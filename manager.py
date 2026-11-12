@@ -359,6 +359,15 @@ def disable_updater():
         run(['schtasks', '/Delete', '/TN', UPDATE_TASK, '/F'], capture_output=True)
 
 
+def relay_client(command, env=None):
+    result = subprocess.run([str(x) for x in command], env=env, creationflags=NO_WINDOW, capture_output=True)
+    if sys.stdout:
+        sys.stdout.buffer.write(result.stdout)
+    if sys.stderr:
+        sys.stderr.buffer.write(result.stderr)
+    return result.returncode
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('enable','update','run','control','diagnose','settings','stop','disable-updates'))
@@ -377,7 +386,7 @@ def main():
     if not (home / 'current.json').exists() and args.action in ('stop','control','diagnose','settings'):
         script, extra = {'stop':('bridge_control.py',['quit']), 'control':('bridge_control.py',[args.command, '--timeout', str(args.timeout)]),
                          'diagnose':('diagnostics.py',['--gui']), 'settings':('settings.py',['--gui'])}[args.action]
-        raise SystemExit(subprocess.call([sys.executable, str(ROOT / 'app' / script), *extra], creationflags=NO_WINDOW))
+        raise SystemExit(relay_client([sys.executable, str(ROOT / 'app' / script), *extra]))
     if args.action == 'enable':
         print(json.dumps(enable(home, args.wheelhouse, args.data_from), ensure_ascii=False))
     elif args.action == 'update':
@@ -395,8 +404,10 @@ def main():
         app = home / current['release'] / 'app'
         script, extra = {'run':('native_bridge.py', []), 'control':('bridge_control.py', [args.command,'--timeout',str(args.timeout)]),
                          'diagnose':('diagnostics.py', ['--gui']), 'settings':('settings.py', ['--gui'])}[args.action]
-        child = subprocess.run([str(home / current['python']), str(app / script), *extra], env=environment(home),
-                               creationflags=NO_WINDOW)
+        command = [str(home / current['python']), str(app / script), *extra]
+        if args.action == 'control':
+            raise SystemExit(relay_client(command, env=environment(home)))
+        child = subprocess.run(command, env=environment(home), creationflags=NO_WINDOW)
         raise SystemExit(child.returncode)
 
 

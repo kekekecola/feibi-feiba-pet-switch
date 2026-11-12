@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 import queue
+import subprocess
+import venv
 import sys
 import tempfile
 import unittest
@@ -44,6 +46,31 @@ def initial_pointer(home):
 
 
 class DesktopUpdateTests(unittest.TestCase):
+    def test_control_output_is_relayed(self):
+        output, error = io.BytesIO(), io.BytesIO()
+        result = subprocess.CompletedProcess([], 3, stdout=b'{"result":"failed"}\n', stderr=b'reason')
+        with patch.object(manager.subprocess, 'run', return_value=result) as run, \
+             patch.object(manager.sys, 'stdout', Mock(buffer=output)), \
+             patch.object(manager.sys, 'stderr', Mock(buffer=error)):
+            self.assertEqual(manager.relay_client(['python', 'client.py']), 3)
+        self.assertEqual(output.getvalue(), b'{"result":"failed"}\n')
+        self.assertEqual(error.getvalue(), b'reason')
+        self.assertTrue(run.call_args.kwargs['capture_output'])
+
+    def test_stable_launcher_preserves_json_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            venv.EnvBuilder(with_pip=False).create(home / '.venv')
+            python = home / '.venv' / 'Scripts' / 'python.exe'
+            source = home / 'versions' / 'test'
+            source.mkdir(parents=True)
+            (source / 'manager.py').write_text('print(\'{"version":"test","phase":"idle"}\')', encoding='utf-8')
+            (home / 'launcher.py').write_bytes((ROOT / 'launcher.py').read_bytes())
+            manager.atomic(home / 'current.json', dict(release='versions/test', python='.venv/Scripts/python.exe'))
+            result = subprocess.run([sys.executable, str(home / 'launcher.py'), 'control','status'],
+                                    capture_output=True, check=True, timeout=20)
+            self.assertEqual(json.loads(result.stdout)['phase'], 'idle')
+
     def test_requirement_newlines_do_not_rebuild_environment(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
