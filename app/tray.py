@@ -2,6 +2,36 @@
 import ctypes
 from ctypes import wintypes as W
 import threading
+from pathlib import Path
+
+
+def menu_entries(state, updater=None, managed=False):
+    updater = updater or {}
+    names = {'feibi':'菲比啾比', 'feiba':'菲八啾比'}
+    form = state.get('form')
+    ready = state.get('phase') == 'idle' and state.get('connection_state') == 'ready' and form in names
+    label, action = ('戴帽 → 菲比啾比', 'put-on') if form == 'feiba' else ('摘帽 → 菲八啾比', 'take-off')
+    if form not in names:
+        label, action = '切换宠物形态', 'toggle'
+    entries = [dict(label='菲比啾比 / 菲八啾比  v' + state.get('version',''), enabled=False),
+               dict(label=status_label(state) + ' · 当前：' + names.get(form,'尚未识别'), enabled=False),
+               dict(label='切换快捷键：' + state.get('hotkey','F8'), enabled=False), None,
+               dict(id=1, label=label, action=action, enabled=ready), None,
+               dict(id=3, label='快捷键设置…', action='settings'),
+               dict(id=2, label='状态与诊断…', action='diagnose'),
+               dict(id=8, label='打开日志文件夹', action='logs'), None]
+    updating = updater.get('phase') in ('checking','downloading','preparing','applying')
+    entries += [dict(id=4, label='正在检查或安装更新…' if updating else '检查并安装更新',
+                     action='update', enabled=managed and not updating)]
+    if not managed:
+        entries.append(dict(label='自动更新尚未开启，详见项目说明', enabled=False))
+    elif updater.get('phase') == 'error':
+        entries.append(dict(label='上次更新失败，请查看状态与诊断', enabled=False))
+    elif updater.get('installed_version'):
+        entries.append(dict(label='已安装：v' + updater['installed_version'], enabled=False))
+    entries += [dict(id=9,label='使用说明与项目主页',action='help'), None,
+                dict(id=5,label='退出并停用 ' + state.get('hotkey','快捷键'),action='quit')]
+    return entries
 
 
 def status_label(state):
@@ -21,6 +51,7 @@ class Tray:
         self.error = None
         self.hwnd = None
         self.registered = False
+        self.icon_loaded = False
         self.thread = threading.Thread(target=self.run, daemon=True)
 
     def start(self):
@@ -73,6 +104,9 @@ class Tray:
         u.SetForegroundWindow.argtypes = [W.HWND]
         u.LoadIconW.argtypes = [W.HINSTANCE, ctypes.c_void_p]
         u.LoadIconW.restype = W.HICON
+        u.LoadImageW.argtypes = [W.HINSTANCE, W.LPCWSTR, W.UINT, ctypes.c_int, ctypes.c_int, W.UINT]
+        u.LoadImageW.restype = W.HANDLE
+        u.DestroyIcon.argtypes = [W.HICON]
         u.CreatePopupMenu.restype = W.HMENU
         u.AppendMenuW.argtypes = [W.HMENU, W.UINT, ctypes.c_size_t, W.LPCWSTR]
         u.DestroyMenu.argtypes = [W.HMENU]
@@ -81,11 +115,14 @@ class Tray:
         u.RegisterWindowMessageW.argtypes = [W.LPCWSTR]
         taskbar_created = u.RegisterWindowMessageW('TaskbarCreated')
         self.data = NI(size=ctypes.sizeof(NI), uid=1, flags=7, callback=0x8001)
+        icon = u.LoadImageW(None, str(Path(__file__).parent / 'assets' / 'feibi-tray.ico'), 1,
+                            u.GetSystemMetrics(49), u.GetSystemMetrics(50), 0x0010)
+        self.icon_loaded = bool(icon)
         def notify(add=False):
             with self.lock:
                 state = self.state.copy()
             self.data.tip = (f"菲比/菲八 {state.get('version', '')} · {state.get('hotkey', 'F8')} · " + status_label(state))[:127]
-            self.data.icon = u.LoadIconW(None, 32513 if state.get('error') or state.get('hotkey_error') else 32516)
+            self.data.icon = icon or u.LoadIconW(None, 32516)
             operation = 0 if add or not self.registered else 1
             self.registered = bool(shell.Shell_NotifyIconW(operation, ctypes.byref(self.data)))
             if operation == 0 and self.registered:
@@ -96,20 +133,24 @@ class Tray:
             try:
                 with self.lock:
                     state = self.state.copy()
-                u.AppendMenuW(handle, 1, 0, status_label(state) + ' · ' + state.get('hotkey', 'F8'))
-                actions = [(1,'切换戴帽 / 摘帽','toggle'), (2,'一键诊断','diagnose'), (3,'设置快捷键','settings'),
-                           (4,'检查并应用更新','update'), (5,'退出切换服务','quit')]
-                for key, label, _ in actions:
-                    u.AppendMenuW(handle, 0, key, label)
+                import os
+                import control
+                from paths import RUNTIME
+                entries = menu_entries(state, control.read_json(RUNTIME / 'update-status.json'), bool(os.environ.get('FEIBI_SWITCH_HOME')))
+                for entry in entries:
+                    if entry is None:
+                        u.AppendMenuW(handle, 0x800, 0, None)
+                    else:
+                        u.AppendMenuW(handle, 0 if entry.get('enabled',True) else 1, entry.get('id',0), entry['label'])
                 point = W.POINT()
                 u.GetCursorPos(ctypes.byref(point))
                 # Only an explicit user-opened menu activates this hidden owner.
                 u.SetForegroundWindow(self.hwnd)
                 chosen = u.TrackPopupMenu(handle, 0x0100 | 0x0002, point.x, point.y, 0, self.hwnd, None)
                 u.PostMessageW(self.hwnd, 0, 0, 0)
-                for key, _, action in actions:
-                    if key == chosen:
-                        self.events.put(action)
+                for entry in entries:
+                    if entry and entry.get('id') == chosen and entry.get('enabled',True) and entry.get('action'):
+                        self.events.put(entry['action'])
             finally:
                 u.DestroyMenu(handle)
         def callback(hwnd, message, wp, lp):
@@ -150,4 +191,6 @@ class Tray:
                 u.DispatchMessageW(ctypes.byref(message))
         finally:
             shell.Shell_NotifyIconW(2, ctypes.byref(self.data))
+            if icon:
+                u.DestroyIcon(icon)
             u.UnregisterClassW(name, instance)

@@ -324,12 +324,20 @@ class Bridge:
             self.state.update(changes)
             if getattr(self, "tray", None):
                 self.state["tray_registered"] = self.tray.registered
+                self.state["tray_icon_custom"] = self.tray.icon_loaded
                 self.state["tray_error"] = self.tray.error
                 self.tray.update(self.state)
             self.state["updated_at"] = time.time()
             write_json(STATUS, self.state)
 
     def utility(self, action):
+        if action == 'logs':
+            os.startfile(str(RUNTIME))
+            return
+        if action == 'help':
+            import webbrowser
+            webbrowser.open('https://github.com/kekekecola/feibi-feiba-pet-switch#readme')
+            return
         if action == 'update':
             if not os.environ.get('FEIBI_SWITCH_HOME'):
                 self.update(update_error='尚未开启自动更新，请运行项目的“开启自动更新.cmd”。')
@@ -469,7 +477,7 @@ class Bridge:
             return
         while not self.hotkey_events.empty():
             item = self.hotkey_events.get_nowait()
-            if isinstance(item, str) and item in ("diagnose", "settings", "update"):
+            if isinstance(item, str) and item in ("diagnose", "settings", "update", "logs", "help"):
                 self.utility(item)
                 continue
             if isinstance(item, tuple):

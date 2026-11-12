@@ -4,6 +4,7 @@ import json
 import os
 import re
 import uuid
+from pathlib import Path
 from paths import RUNTIME
 
 SETTINGS = RUNTIME / 'settings.json'
@@ -82,6 +83,10 @@ def gui():
     from tkinter import ttk
     import control
     root = tk.Tk()
+    try:
+        root.iconbitmap(str(Path(__file__).parent / 'assets' / 'feibi-tray.ico'))
+    except tk.TclError:
+        pass
     root.title('菲比 / 菲八 · 快捷键')
     root.geometry('440x170')
     try:
