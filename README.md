@@ -1,6 +1,10 @@
-# 菲比 / 菲八 · 原生 Pet F8 切换
+# 菲比啾比 / 菲八啾比 Codex 桌宠 · F8 戴帽与摘帽切换
 
 在 Windows 版 Codex 桌面客户端的两只原生宠物之间，通过 **F8** 播放摘帽 / 戴帽 CG 后切换形态。包含菲比啾比、带番茄发卡的菲八啾比、透明过渡动画及全部切换源码。
+
+**Feibi Jiubi / Feiba Jiubi — native Codex desktop pets with F8 hat-on/off transitions.**
+
+An unofficial Windows companion project featuring **Feibi Jiubi (菲比啾比)** and **Feiba Jiubi (菲八啾比)**. Press F8 to switch between the two native pets through transparent hat-removal or hat-wearing animations. Includes both pet sprite sheets, the transition player, background switching bridge, installer, and optional chat-control skill. Animation size follows the native pet size and display DPI. Requires Python 3.11+ and a compatible Codex desktop client; not a standalone EXE. See the installation steps, safeguards, limitations, and license below before use.
 
 | 摘帽 | 戴帽 |
 | --- | --- |
