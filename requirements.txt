@@ -1,0 +1,3 @@
+Pillow==12.2.0
+uiautomation==2.0.29
+comtypes==1.5.0
