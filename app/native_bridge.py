@@ -21,6 +21,7 @@ import background_uia as background
 from request_lifecycle import valid_command, claim
 import recovery_journal
 import isolated_calls
+import maintenance
 
 APP_DIR = Path(__file__).resolve().parent
 RUNTIME = APP_DIR / "runtime"
@@ -327,6 +328,7 @@ class Bridge:
         self.pending_request = None
         self.request_meta = {}
         self.next_reconnect = 0
+        self.next_maintenance = 0
         self.state = {"running": True, "pid": os.getpid(), "phase": "idle",
                       "native_bridge_configured": True, "native_switch_confirmed": False,
                       "background_selection": True,
@@ -475,6 +477,12 @@ class Bridge:
         if not self.closing:
             try:
                 if not self.busy:
+                    if time.monotonic() >= self.next_maintenance:
+                        active = set(self.request_meta)
+                        if self.pending_request and self.pending_request[1]:
+                            active.add(self.pending_request[1])
+                        maintenance.cleanup(RUNTIME, active)
+                        self.next_maintenance = time.monotonic() + 3600
                     if recovery_journal.JOURNAL.exists():
                         hide_cg()
                         recovery_journal.recover(cg_visible())
@@ -519,10 +527,9 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     RUNTIME.mkdir(exist_ok=True)
-    logging.basicConfig(filename=RUNTIME / "native-bridge.log", level=logging.INFO,
-                        encoding="utf-8", format="%(asctime)s %(levelname)s %(message)s")
     native.dpi_awareness()
     if args.once or args.prepare_only:
+        maintenance.configure_logging(RUNTIME, worker=True)
         if sys.stdout:
             sys.stdout.reconfigure(encoding="utf-8")
         try:
@@ -548,6 +555,7 @@ def main():
         kernel.CloseHandle(handle)
         return 0
     root = None
+    maintenance.configure_logging(RUNTIME)
     try:
         root = ServiceLoop()
         bridge = Bridge(root)

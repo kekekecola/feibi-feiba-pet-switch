@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import venv
+import time
+from install_transaction import Transaction, task_snapshot
 from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parent
@@ -29,9 +31,12 @@ def verify_assets():
             raise RuntimeError('Asset checksum mismatch: ' + relative)
 
 
-def install_pets(home):
+def install_pets(home, transaction=None):
     for source in (ROOT / 'pets').iterdir():
         target = home / 'pets' / source.name
+        if transaction:
+            for name in ('pet.json', 'spritesheet.webp'):
+                transaction.remember(target / name)
         if target.exists():
             unchanged = all((target / name).exists() and (target / name).read_bytes() == (source / name).read_bytes()
                             for name in ('pet.json', 'spritesheet.webp'))
@@ -71,6 +76,61 @@ def task_xml(pythonw, user_sid):
 <Actions Context="Author"><Exec><Command>{escape(str(pythonw))}</Command><Arguments>"{escape(str(ROOT / 'app' / 'native_bridge.py'))}"</Arguments><WorkingDirectory>{escape(str(ROOT / 'app'))}</WorkingDirectory></Exec></Actions></Task>'''
 
 
+def stop_service(python):
+    control = ROOT / 'app' / 'bridge_control.py'
+    if python.exists() and control.exists():
+        try:
+            subprocess.run([str(python), str(control), 'quit'], timeout=40, capture_output=True)
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # A damaged runtime must not prevent scheduler cleanup.
+    snapshot = task_snapshot()
+    if snapshot.get('running'):
+        command(['schtasks', '/End', '/TN', TASK], timeout=30)
+        deadline = time.monotonic() + 15
+        while task_snapshot().get('running'):
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Previous F8 task did not stop; installation cancelled.')
+            time.sleep(.2)
+
+
+def uninstall(python):
+    stop_service(python)
+    if task_snapshot()['exists']:
+        command(['schtasks', '/Delete', '/TN', TASK, '/F'], timeout=30)
+    print('F8 logon task removed; pet files and backups retained.')
+
+
+def apply_install(args, home, python, xml):
+    transaction = Transaction(task_snapshot())
+    transaction.remember(ROOT / 'app' / 'runtime' / 'pet-roles.json')
+    try:
+        if transaction.snapshot.get('running'):
+            transaction.task_touched = True
+            stop_service(python)
+        if not args.skip_pets:
+            install_pets(home, transaction)
+        configure(args)
+        with tempfile.TemporaryDirectory(prefix='feibi-task-') as folder:
+            task_file = Path(folder) / 'task.xml'
+            task_file.write_text(xml, encoding='utf-16')
+            transaction.task_touched = True
+            command(['schtasks', '/Create', '/TN', TASK, '/XML', task_file, '/F'])
+        if not args.no_start:
+            command(['schtasks', '/Run', '/TN', TASK])
+    except Exception as original:
+        try:
+            # A failed start may still have launched the new service.
+            if transaction.task_touched:
+                stop_service(python)
+        except Exception:
+            pass
+        try:
+            transaction.rollback()
+        except Exception as recovery_error:
+            raise RuntimeError(str(original) + '; ' + str(recovery_error)) from original
+        raise RuntimeError(str(original) + '; managed files and scheduled task rolled back.') from original
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'uninstall', 'configure', 'verify'))
@@ -80,7 +140,8 @@ def main():
     parser.add_argument('--feibi-id')
     parser.add_argument('--feiba-id')
     args = parser.parse_args()
-    verify_assets()
+    if args.action in ('install', 'verify'):
+        verify_assets()
     if args.action == 'verify':
         print('All bundled asset checksums verified.')
         return
@@ -93,12 +154,7 @@ def main():
         raise RuntimeError('Windows and Python 3.11+ are required.')
     python = ROOT / '.venv' / 'Scripts' / 'python.exe'
     if args.action == 'uninstall':
-        # Keep pets, backups, configuration and source files for the user.
-        if python.exists():
-            subprocess.run([str(python), str(ROOT / 'app' / 'bridge_control.py'), 'quit'], timeout=40)
-        subprocess.run(['schtasks', '/End', '/TN', TASK], capture_output=True)
-        command(['schtasks', '/Delete', '/TN', TASK, '/F'])
-        print('F8 logon task removed; pet files and backups retained.')
+        uninstall(python)
         return
     if args.action == 'configure':
         configure(args)
@@ -109,18 +165,10 @@ def main():
         venv.EnvBuilder(with_pip=True).create(ROOT / '.venv')
     command([python, '-m', 'pip', 'install', '-r', ROOT / 'requirements.txt'])
     command([python, '-c', 'import PIL, uiautomation, comtypes, tkinter'])
-    if not args.skip_pets:
-        install_pets(home)
-    configure(args)
     identity = command(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True, text=True)
     sid = next(csv.reader(identity.stdout.splitlines()))[1]
     xml = task_xml(python.with_name('pythonw.exe'), sid)
-    with tempfile.TemporaryDirectory(prefix='feibi-task-') as folder:
-        task_file = Path(folder) / 'task.xml'
-        task_file.write_text(xml, encoding='utf-16')
-        command(['schtasks', '/Create', '/TN', TASK, '/XML', task_file, '/F'])
-    if not args.no_start:
-        command(['schtasks', '/Run', '/TN', TASK])
+    apply_install(args, home, python, xml)
     print('Installed. In the desktop client, refresh Pets and select either bundled pet, then press F8.')
     print('Keep this folder in place. The task starts only the F8 helper, never the desktop client.')
 
