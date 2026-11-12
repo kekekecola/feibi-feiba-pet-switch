@@ -273,12 +273,13 @@ def _find_overlay_once(windows: Windows):
         if not window.visible or not window.exstyle & 0x8:
             continue
         root = auto.ControlFromHandle(window.hwnd)
-        documents = [c for c, depth in walk_controls(root, 12)
+        controls = list(walk_controls(root, 24))
+        documents = [c for c, depth in controls
                      if c.ControlTypeName == "DocumentControl"]
         if not any("avatar-overlay" in control_value(c) for c in documents):
             continue
         expected = preferences().get('avatar-overlay-mascot-width-px', 112) * window.dpi / 96
-        for image, _ in walk_controls(root, 24):
+        for image, _ in controls:
             if image.ControlTypeName != 'ImageControl':
                 continue
             rect = image.BoundingRectangle

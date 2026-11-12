@@ -14,7 +14,7 @@ import time
 import uuid
 
 
-RUNTIME = Path(__file__).resolve().parent / "runtime"
+from paths import RUNTIME, VERSION
 
 
 def read_json(path: Path) -> dict:

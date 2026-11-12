@@ -7,7 +7,8 @@ import uuid
 import control
 
 DEFAULT_ROLES = Path(__file__).resolve().parent / 'pet-roles.json'
-ROLES = DEFAULT_ROLES.parent / 'runtime' / 'pet-roles.json'
+from paths import RUNTIME
+ROLES = RUNTIME / 'pet-roles.json'
 
 
 def load():
@@ -61,8 +62,8 @@ def bind(form, pet_id):
     save(roles)
 
 
-def matches(form, text):
-    role = load()[form]
+def matches(form, text, roles=None):
+    role = (load() if roles is None else roles)[form]
     description = role.get('description', '')
     return (text == role['name'] or text.startswith(role['name'] + ' ')
             or bool(description and text.endswith(description)))

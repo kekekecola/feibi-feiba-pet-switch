@@ -5,3 +5,4 @@ app/runtime/
 *.log
 *.tmp
 dist/
+managed-link.json

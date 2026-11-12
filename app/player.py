@@ -24,7 +24,7 @@ import recovery_journal
 
 APP_DIR = Path(__file__).resolve().parent
 ASSETS = APP_DIR / "assets"
-RUNTIME = APP_DIR / "runtime"
+from paths import RUNTIME, VERSION
 TITLE = "菲比 · F8 戴帽/摘帽"
 HOTKEY_ID = 0x46B8
 WM_HOTKEY = 0x0312

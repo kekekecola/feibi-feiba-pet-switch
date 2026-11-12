@@ -28,7 +28,8 @@ def labels():
     window = native.Windows().main()
     archive = Path(native.Windows().executable(window.pid)).parent / 'resources' / 'app.asar'
     result = {key: set(values) for key, values in FALLBACK.items()}
-    cache = Path(__file__).resolve().parent / 'runtime' / 'ui-labels.json'
+    from paths import RUNTIME
+    cache = RUNTIME / 'ui-labels.json'
     try:
         stamp = [str(archive), archive.stat().st_mtime_ns]
         if cache.exists():

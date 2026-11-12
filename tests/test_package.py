@@ -24,7 +24,7 @@ spec.loader.exec_module(installer)
 
 class PackageTests(unittest.TestCase):
     def test_syntax(self):
-        for path in (ROOT / 'app').glob('*.py'):
+        for path in [*(ROOT / 'app').glob('*.py'), *ROOT.glob('*.py')]:
             py_compile.compile(str(path), doraise=True)
 
     def test_assets(self):

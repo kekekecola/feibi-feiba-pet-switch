@@ -11,7 +11,7 @@ import control
 from request_lifecycle import decide
 from native_bridge import write_json
 
-RUNTIME = Path(__file__).resolve().parent / "runtime"
+from paths import RUNTIME, VERSION
 
 
 def status():

@@ -24,6 +24,7 @@ class ReliabilityTests(unittest.TestCase):
         with patch.object(sys, 'argv', ['install.py', 'uninstall']), \
              patch.object(installer, 'verify_assets', side_effect=AssertionError('must not verify')), \
              patch.object(installer, 'stop_service') as stop, \
+             patch('manager.disable_updater'), \
              patch.object(installer, 'task_snapshot', return_value={'exists': False}), \
              patch.object(installer, 'command') as command:
             installer.main()

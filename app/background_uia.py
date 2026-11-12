@@ -14,7 +14,8 @@ import native_uia as native
 import msaa_controls
 import ui_labels
 
-STATE = Path(__file__).resolve().parent / "runtime" / "background-settings.json"
+from paths import RUNTIME
+STATE = RUNTIME / "background-settings.json"
 MARKER = "FeibiNativeBackgroundSettings"
 MARKER_VALUE = 0x46484942
 

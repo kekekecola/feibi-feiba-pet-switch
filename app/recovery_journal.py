@@ -9,7 +9,8 @@ import uuid
 import control
 import native_uia as native
 
-JOURNAL = Path(__file__).resolve().parent / 'runtime' / 'native-recovery.json'
+from paths import RUNTIME
+JOURNAL = RUNTIME / 'native-recovery.json'
 PROPERTY = 'FeibiNativeRecovery'
 
 

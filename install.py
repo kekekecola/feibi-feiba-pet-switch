@@ -94,7 +94,19 @@ def stop_service(python):
 
 
 def uninstall(python):
-    stop_service(python)
+    from manager import disable_updater, stop as stop_managed
+    disable_updater()
+    snapshot = task_snapshot()
+    managed = None
+    if snapshot.get('xml'):
+        import xml.etree.ElementTree as ET
+        node = ET.fromstring(snapshot['xml']).find('.//{http://schemas.microsoft.com/windows/2004/02/mit/task}WorkingDirectory')
+        if node is not None and node.text and (Path(node.text) / 'current.json').exists():
+            managed = Path(node.text)
+    if managed:
+        stop_managed(managed)
+    else:
+        stop_service(python)
     if task_snapshot()['exists']:
         command(['schtasks', '/Delete', '/TN', TASK, '/F'], timeout=30)
     print('F8 logon task removed; pet files and backups retained.')

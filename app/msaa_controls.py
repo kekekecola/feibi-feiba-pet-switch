@@ -18,6 +18,7 @@ def pet_actions(hwnd, names):
         ctypes.byref(IAccessible._iid_), ctypes.byref(root))
     if result != 0 or not root:
         raise RuntimeError('无法读取后台原生 MSAA 控件。')
+    roles = pet_registry.load()
     found = {}
     observed = {}
     ambiguous = set()
@@ -28,7 +29,7 @@ def pet_actions(hwnd, names):
         for form, label in names.items():
             # Chromium exposes clickable text descendants too. Only the actual
             # pushbutton is a candidate; duplicate cards still fail closed.
-            if pet_registry.matches(form, name) and obj.accRole(child) == 43 and obj.accDefaultAction(child):
+            if pet_registry.matches(form, name, roles) and obj.accRole(child) == 43 and obj.accDefaultAction(child):
                 if form in found:
                     ambiguous.add(form)
                 found[form] = (obj, child)

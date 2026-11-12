@@ -22,9 +22,10 @@ from request_lifecycle import valid_command, claim
 import recovery_journal
 import isolated_calls
 import maintenance
+import tray
 
 APP_DIR = Path(__file__).resolve().parent
-RUNTIME = APP_DIR / "runtime"
+from paths import RUNTIME, VERSION
 STATUS = RUNTIME / "bridge-status.json"
 ACTIONS = {"toggle", "take-off", "put-on", "quit"}
 PENDING_RESTORE = []
@@ -60,49 +61,8 @@ class ServiceLoop:
                 time.sleep(0.02)
 
 
-class GlobalF8:
-    """Own a Win32 message queue on a dedicated thread, without Tcl reentrancy."""
-    def __init__(self, events):
-        self.events = events
-        self.ready = threading.Event()
-        self.thread_id = None
-        self.error = None
-        self.thread = threading.Thread(target=self.listen, daemon=True)
-
-    def install(self):
-        self.thread.start()
-        if not self.ready.wait(3):
-            raise RuntimeError("F8 消息线程未就绪。")
-        if self.error:
-            raise self.error
-
-    def listen(self):
-        from ctypes import wintypes
-        user = ctypes.WinDLL("user32", use_last_error=True)
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.GetCurrentThreadId.restype = wintypes.DWORD
-        user.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
-        user.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
-        user.GetMessageW.restype = ctypes.c_int
-        self.thread_id = kernel.GetCurrentThreadId()
-        if not user.RegisterHotKey(None, 0x46B8, 0x4000, 0x77):
-            self.error = RuntimeError("F8 已被其他程序占用，无法绑定。")
-            self.ready.set()
-            return
-        self.ready.set()
-        message = wintypes.MSG()
-        try:
-            while user.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
-                if message.message == 0x0312 and message.wParam == 0x46B8:
-                    self.events.put("toggle")
-        finally:
-            user.UnregisterHotKey(None, 0x46B8)
-
-    def close(self):
-        if self.thread_id:
-            ctypes.WinDLL("user32").PostThreadMessageW(self.thread_id, 0x0012, 0, 0)
-            self.thread.join(timeout=2)
-
+from hotkeys import GlobalF8
+import settings
 
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,6 +167,7 @@ def recover_native_visibility():
 
 
 def transition(action, report):
+    started = time.perf_counter()
     source = native.selected_form()
     if source is None:
         source = native.reconcile_selected()
@@ -217,6 +178,7 @@ def transition(action, report):
         target = "feiba" if source == "feibi" else "feibi"
     windows = native.Windows()
     overlay, bounds = native.find_overlay(windows)
+    overlay_ms = round((time.perf_counter() - started) * 1000, 1)
     trace_focus("overlay-found")
     if source == target:
         return {"form": source, "selected_id": native.PET_IDS[source],
@@ -234,6 +196,7 @@ def transition(action, report):
         report(phase="preparing", form=source, target_form=target)
         ensure_cg(allow_start=False)
         card = selector.prepare(target)
+        card_ms = round((time.perf_counter() - started) * 1000, 1)
         trace_focus("card-ready")
         # The ImageControl bounds are the actual native sprite cell in physical pixels.
         dpi = overlay.dpi
@@ -264,6 +227,7 @@ def transition(action, report):
             if playback.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError("CG 未开始显示，原生选择已取消。")
             time.sleep(0.04)
+        first_cg_ms = round((time.perf_counter() - started) * 1000, 1)
         trace_focus("cg-visible")
         selector.select(target, card)
         trace_focus("native-selected")
@@ -314,6 +278,7 @@ def transition(action, report):
             "native_switch_confirmed": True, "native_visible": visible,
             "cg_visible": False, "native_pet_size_px": original_size,
             "native_image_rect": list(bounds), "dpi": dpi,
+            "timings_ms": dict(overlay=overlay_ms, prepared=card_ms, first_cg=first_cg_ms, total=round((time.perf_counter()-started)*1000, 1)),
             "foreground_before": original_foreground,
             "foreground_after": windows.user32.GetForegroundWindow(),
             "background_selection": True}
@@ -334,9 +299,18 @@ class Bridge:
                       "background_selection": True,
                       "hotkey": "F8", "hotkey_registered": False, "cg_visible": False}
         self.hotkey_events = queue.Queue()
-        self.hotkey = GlobalF8(self.hotkey_events)
+        try:
+            desired_hotkey = settings.load()['hotkey']
+            settings_error = None
+        except (OSError, ValueError) as error:
+            desired_hotkey, settings_error = 'F8', str(error)
+        self.hotkey = GlobalF8(self.hotkey_events, desired_hotkey, settings.last_good())
+        self.settings_stamp = None
+        self.progress_path = None
+        self.tray = tray.Tray(self.hotkey_events)
+        self.tray.start()
         self.hotkey.install()
-        self.update(hotkey_registered=True)
+        self.update(hotkey_registered=self.hotkey.registered, hotkey=self.hotkey.active, hotkey_error=self.hotkey.error, settings_error=settings_error, version=VERSION)
         root.after(80, self.poll)
         root.after(1000, self.heartbeat)
         root.after(50, self.reconnect_if_needed)
@@ -344,8 +318,27 @@ class Bridge:
     def update(self, **changes):
         with self.lock:
             self.state.update(changes)
+            if getattr(self, "tray", None):
+                self.state["tray_registered"] = self.tray.registered
+                self.state["tray_error"] = self.tray.error
+                self.tray.update(self.state)
             self.state["updated_at"] = time.time()
             write_json(STATUS, self.state)
+
+    def utility(self, action):
+        if action == 'update':
+            if not os.environ.get('FEIBI_SWITCH_HOME'):
+                self.update(update_error='尚未开启自动更新，请运行项目的“开启自动更新.cmd”。')
+                action = 'diagnose'
+            else:
+                result = subprocess.run(['schtasks', '/Run', '/TN', 'FeibiFeibaPetSwitchUpdate'],
+                                        capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                self.update(update_error=None if result.returncode == 0 else '无法启动更新任务')
+                return
+        script = 'diagnostics.py' if action == 'diagnose' else 'settings.py'
+        subprocess.Popen([str(Path(sys.executable).with_name('pythonw.exe')), str(APP_DIR / script), '--gui'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
 
     def request(self, action, command_id=None):
         if action == "quit":
@@ -375,7 +368,15 @@ class Bridge:
                 return
             command = [str(Path(sys.executable).with_name('python.exe')), str(APP_DIR / 'native_bridge.py')]
             command += ['--once', action] if action else ['--prepare-only']
+            token = uuid.uuid4().hex
+            progress_path = RUNTIME / ('progress-' + token + '.json')
+            self.progress_path = progress_path
+            command += ['--progress-token', token]
+            worker_started = time.perf_counter()
             result = json.loads(isolated_calls.run(command, timeout=35 if not action else 22))
+            if action:
+                result['worker_total_ms'] = round((time.perf_counter()-worker_started)*1000, 1)
+            self.progress_path = None
             self.update(phase="idle", connection_state="ready", target_form=None, error=None, **result)
             self.ack(command_id, "completed", "原生智能伙伴已切换。")
             logging.info("Native transition completed: %s", result)
@@ -395,6 +396,15 @@ class Bridge:
                         form=native.selected_form(), cg_visible=control.status().get("visible", False))
             self.ack(command_id, "failed", str(error))
         finally:
+            path = self.progress_path
+            self.progress_path = None
+            try:
+                if path:
+                    path.unlink(missing_ok=True)
+                if 'progress_path' in locals():
+                    progress_path.unlink(missing_ok=True)
+            except OSError:
+                logging.exception('Progress file cleanup deferred')
             with self.lock:
                 self.busy = False
                 pending = self.pending_request
@@ -452,10 +462,18 @@ class Bridge:
             return
         while not self.hotkey_events.empty():
             item = self.hotkey_events.get_nowait()
+            if isinstance(item, str) and item in ("diagnose", "settings", "update"):
+                self.utility(item)
+                continue
             if isinstance(item, tuple):
                 self.request(*item)
             else:
                 self.request(item)
+        while not self.hotkey.notifications.empty():
+            notification = self.hotkey.notifications.get_nowait()
+            self.update(**notification)
+            if notification.get('hotkey_registered') and not notification.get('hotkey_error'):
+                settings.remember_good(notification['hotkey'])
         folder = RUNTIME / "bridge-commands"
         folder.mkdir(parents=True, exist_ok=True)
         for path in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime):
@@ -476,6 +494,14 @@ class Bridge:
     def heartbeat(self):
         if not self.closing:
             try:
+                stamp = settings.SETTINGS.stat().st_mtime_ns if settings.SETTINGS.exists() else 0
+                if stamp != self.settings_stamp:
+                    try:
+                        self.hotkey.rebind(settings.load()['hotkey'])
+                        self.update(settings_error=None)
+                        self.settings_stamp = stamp
+                    except (OSError, ValueError) as error:
+                        self.update(settings_error=str(error))
                 if not self.busy:
                     if time.monotonic() >= self.next_maintenance:
                         active = set(self.request_meta)
@@ -493,7 +519,14 @@ class Bridge:
                                 native_pet_size_px=prefs.get("avatar-overlay-mascot-width-px", 112))
                     self.reconnect_if_needed()
                 else:
-                    self.update()
+                    with self.lock:
+                        if self.progress_path and self.state.get('phase') != 'idle':
+                            path = self.progress_path
+                            progress = control.read_json(path)
+                            if self.progress_path == path and progress.get('token') == path.stem.removeprefix('progress-'):
+                                keys = ('phase','form','target_form','native_visible','cg_visible')
+                                self.update(**{key:progress[key] for key in keys if key in progress})
+                        self.update()
             except Exception:
                 logging.exception("Heartbeat read failed; will retry")
             finally:
@@ -501,7 +534,7 @@ class Bridge:
 
     def close(self):
         try:
-            for cleanup in (self.hotkey.close, hide_cg, recover_native_visibility, background.close):
+            for cleanup in (self.tray.close, self.hotkey.close, hide_cg, recover_native_visibility, background.close):
                 try:
                     cleanup()
                 except Exception:
@@ -525,8 +558,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", choices=("toggle", "take-off", "put-on"))
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--progress-token")
     args = parser.parse_args()
-    RUNTIME.mkdir(exist_ok=True)
+    if args.progress_token and (len(args.progress_token) != 32 or any(c not in "0123456789abcdef" for c in args.progress_token)):
+        parser.error("Invalid progress token")
+    RUNTIME.mkdir(parents=True, exist_ok=True)
     native.dpi_awareness()
     if args.once or args.prepare_only:
         maintenance.configure_logging(RUNTIME, worker=True)
@@ -535,9 +571,14 @@ def main():
         try:
             auto = native.automation()
             with auto.UIAutomationInitializerInThread():
-                background.prepare()
+                if not args.once or not background.owned_window():
+                    background.prepare()
                 ensure_cg()
-                result = transition(args.once, lambda **data: logging.info("phase %s", data)) if args.once else {}
+                def report(**data):
+                    logging.info('phase %s', data)
+                    if args.progress_token:
+                        write_json(RUNTIME / ('progress-' + args.progress_token + '.json'), dict(token=args.progress_token, **data))
+                result = transition(args.once, report) if args.once else {}
             print(json.dumps(result, ensure_ascii=False))
             return 0
         except Exception as error:

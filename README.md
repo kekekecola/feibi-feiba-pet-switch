@@ -6,6 +6,8 @@
 
 An unofficial Windows companion project featuring **Feibi Jiubi (菲比啾比)** and **Feiba Jiubi (菲八啾比)**. Press F8 to switch between the two native pets through transparent hat-removal or hat-wearing animations. Includes both pet sprite sheets, the transition player, background switching bridge, installer, and optional chat-control skill. Animation size follows the native pet size and display DPI. Requires Python 3.11+ and a compatible Codex desktop client; not a standalone EXE. See the installation steps, safeguards, limitations, and license below before use.
 
+Version 1.2 adds a native Windows tray icon, local diagnostics, configurable live hotkeys, reduced redundant UI traversal, and opt-in verified stable-release updates with version staging and startup rollback.
+
 | 摘帽 | 戴帽 |
 | --- | --- |
 | ![摘帽预览](media/hat-take-off.gif) | ![戴帽预览](media/hat-put-on.gif) |
@@ -13,6 +15,19 @@ An unofficial Windows companion project featuring **Feibi Jiubi (菲比啾比)**
 GIF 是动画预览；实际过渡使用 PNG 逐像素透明叠层。正式常驻的是客户端原生宠物。
 
 ## 下载和安装
+
+### v1.2.0 托盘、快捷键、提速与自动更新
+
+- 系统托盘显示准备、切换、重连或异常状态。右键托盘可切换形态、打开本地诊断、设置快捷键、检查更新或退出。托盘可能被 Windows 放在折叠区。
+- 默认 F8，可在托盘设置中改成其他功能键或 `Ctrl+Alt+H` 等组合键，无须重启。注册失败时保留原绑定；重启时尝试恢复上次可用按键。F12 与 Windows 键组合不支持。
+- 去掉普通切换中重复的 MSAA 控件扫描，单次扫描只加载一次角色配置，并合并原生图像查找中的重复遍历；隔离进程与超时恢复保持。本机两次旧版样本为4.01/4.09秒，新版为3.66/3.33秒，平均约快14%，不是所有电脑的性能保证。
+- 可选自动更新：每30分钟及登录时检查该仓库的稳定发行版，核对 GitHub 提供的 SHA-256 和素材清单，先暂存、准备依赖，再停止旧服务、切换并检查启动健康状态。联网、下载或准备依赖失败时不停止旧版；新服务启动失败时尝试恢复上一版。
+
+**开启自动更新：**先完成下面的普通安装并退出切换服务，再双击 `开启自动更新.cmd`。它会在 `%LOCALAPPDATA%/FeibiFeibaPetSwitch` 建立独立环境、版本目录和共享运行配置，注册 `FeibiFeibaPetSwitch` 与 `FeibiFeibaPetSwitchUpdate` 两个当前用户任务，不会自动打开客户端。原生宠物文件和客户端大小设置保留。版本化安装成功后，以托盘菜单管理服务；自定义安装路径可运行 `python manager.py enable --home "你的目录"`。
+
+检查结果与失败原因可在托盘“一键诊断”查看。自动更新接受稳定版，不自动降级；它依赖本机登录、联网、GitHub可用及任务权限，不能承诺始终即时更新。网络恢复后的后续检查会重试。自动更新更新程序与随包CG，不调用云端接口改写现有云端宠物图集；涉及宠物本体素材变化时须按对应发行说明刷新。上次工作版本和切换记录保留；不保证断电或系统同时终止所有相关进程时立即恢复。
+
+版本化目录中的命令行入口：`.venv\Scripts\python.exe launcher.py control status`，还支持 `control toggle`、`diagnose`、`settings`、`update`（手动更新建议从托盘启动独立更新任务）。`launcher.py disable-updates` 可关闭更新任务；卸载脚本会先移除更新任务，再停止主服务，保留数据与版本文件。
 
 ### v1.1.0 安装与维护优化
 
@@ -53,7 +68,7 @@ GIF 是动画预览；实际过渡使用 PNG 逐像素透明叠层。正式常�
 
 ## 没有什么 / 不保证什么
 
-- **没有原生右键“摘帽 / 戴帽”菜单。** 当前触发方式是全局 F8，另有命令行和可选 skill。
+- **没有原生宠物右键“摘帽 / 戴帽”菜单。** 可通过可配置的全局快捷键、托盘菜单、命令行和可选 skill 触发。
 - 没有修改、注入或补丁化客户端程序；这是依赖 UI Automation / MSAA 的非官方外部辅助工具，**不是 OpenAI 官方受支持的切换 API**。
 - 没有一键 EXE，也没有捆绑 Python 解释器；第一次安装需 Python 和联网。尚未在全新电脑完整验证安装流程。
 - 不支持 macOS、Linux、浏览器版或移动版；F8 被其他软件占用时不能注册。某些笔记本需 `Fn+F8`。
@@ -76,6 +91,8 @@ ID 可在你自己的 `~/.codex/config.toml` 的 `[desktop]` 中读取 `selected
 运行映射保存在 `app/runtime/pet-roles.json`，默认模板为 `app/pet-roles.json`。也可运行 `install.py configure --feibi-id ... --feiba-id ...` 后退出并启动服务。名称、描述和图像同时改变时需更新映射中的名称和描述。请勿把自己的 runtime 文件提交到仓库。
 
 ## 命令行与 Skill
+
+以下是普通源码安装的命令；版本化安装使用上文的launcher.py入口。
 
 ```powershell
 .venv\Scripts\python.exe app\bridge_control.py status
