@@ -31,8 +31,13 @@ def verify_assets():
             raise RuntimeError('Asset checksum mismatch: ' + relative)
 
 
-def install_pets(home, transaction=None):
+def install_pets(home, transaction=None, reuse=None):
+    reuse = reuse or {}
+    from pet_install_guard import PETS
     for source in (ROOT / 'pets').iterdir():
+        if any(source.name == identifier and form in reuse for form,(identifier,_) in PETS.items()):
+            print('Reusing existing migrated pet; no local copy added: ' + source.name)
+            continue
         target = home / 'pets' / source.name
         if transaction:
             for name in ('pet.json', 'spritesheet.webp'):
@@ -113,6 +118,10 @@ def uninstall(python):
 
 
 def apply_install(args, home, python, xml):
+    from pet_install_guard import inspect
+    inspection = inspect(home) if not args.skip_pets else {'reuse':{},'conflicts':[]}
+    if inspection['conflicts']:
+        raise RuntimeError('\n'.join(inspection['conflicts']))
     transaction = Transaction(task_snapshot())
     transaction.remember(ROOT / 'app' / 'runtime' / 'pet-roles.json')
     try:
@@ -120,7 +129,10 @@ def apply_install(args, home, python, xml):
             transaction.task_touched = True
             stop_service(python)
         if not args.skip_pets:
-            install_pets(home, transaction)
+            install_pets(home, transaction, inspection['reuse'])
+            for form, identifier in inspection['reuse'].items():
+                if not getattr(args, form + '_id', None):
+                    setattr(args, form + '_id', identifier)
         configure(args)
         with tempfile.TemporaryDirectory(prefix='feibi-task-') as folder:
             task_file = Path(folder) / 'task.xml'
@@ -145,7 +157,7 @@ def apply_install(args, home, python, xml):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('install', 'uninstall', 'configure', 'verify'))
+    parser.add_argument('action', choices=('install', 'uninstall', 'configure', 'verify', 'check-pets'))
     parser.add_argument('--skip-pets', action='store_true', help='Use an existing pair instead of installing local copies')
     parser.add_argument('--no-start', action='store_true', help='Register logon task without starting now')
     parser.add_argument('--dry-run', action='store_true', help='Validate assets and show plan without modifying this machine')
@@ -158,6 +170,15 @@ def main():
         print('All bundled asset checksums verified.')
         return
     home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+    if args.action == 'check-pets':
+        from pet_install_guard import inspect
+        print(json.dumps(inspect(home), ensure_ascii=False, indent=2))
+        return
+    if args.action == 'install' and not args.skip_pets:
+        from pet_install_guard import inspect
+        inspection = inspect(home)
+        if inspection['conflicts']:
+            raise RuntimeError('\n'.join(inspection['conflicts']))
     if args.dry_run:
         print(json.dumps(dict(action=args.action, task=TASK, pets_destination=str(home / 'pets'),
                               python_environment=str(ROOT / '.venv'), skip_pets=args.skip_pets), ensure_ascii=False))
