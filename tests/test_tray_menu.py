@@ -42,6 +42,10 @@ class TrayMenuTests(unittest.TestCase):
         icon = ROOT / 'app' / 'assets' / 'feibi-tray.ico'
         with Image.open(icon) as im:
             self.assertTrue({(16,16),(32,32),(64,64),(256,256)}.issubset(im.ico.sizes()))
+            bounds = im.getchannel('A').getbbox()
+            self.assertGreaterEqual(bounds[2]-bounds[0],240)
+            tiny = im.ico.getimage((16,16)).convert('RGBA').getchannel('A').getbbox()
+            self.assertGreaterEqual(tiny[2]-tiny[0],14)
         user = ctypes.WinDLL('user32')
         user.LoadImageW.argtypes = [wintypes.HINSTANCE,wintypes.LPCWSTR,wintypes.UINT,ctypes.c_int,ctypes.c_int,wintypes.UINT]
         user.LoadImageW.restype = wintypes.HANDLE
