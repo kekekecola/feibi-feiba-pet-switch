@@ -5,6 +5,7 @@ import argparse
 import ctypes
 from ctypes import wintypes
 import json
+import logging
 import os
 from pathlib import Path
 import threading
@@ -293,7 +294,21 @@ class BackgroundSelection:
         self.foreground_before = windows.user32.GetForegroundWindow()
 
     def prepare(self, target):
-        return msaa_controls.pet_actions(self.window.hwnd, native.PET_NAMES)[target]
+        self.repaired = False
+        try:
+            return msaa_controls.pet_actions(self.window.hwnd, native.PET_NAMES)[target]
+        except RuntimeError:
+            # No selection or CG has happened yet: rebuilding here cannot
+            # repeat a toggle which may already have taken effect.
+            logging.warning('Pet controls stale; repairing helper before selection')
+            prepare()
+            window = owned_window()
+            if window is None:
+                raise RuntimeError('后台设置窗口恢复失败，未执行原生切换。')
+            self.window = window
+            self.root = native.automation().ControlFromHandle(window.hwnd)
+            self.repaired = True
+            return msaa_controls.pet_actions(window.hwnd, native.PET_NAMES)[target]
 
     def select(self, target, card):
         user = self.windows.user32

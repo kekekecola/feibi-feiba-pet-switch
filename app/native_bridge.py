@@ -196,6 +196,10 @@ def transition(action, report):
         report(phase="preparing", form=source, target_form=target)
         ensure_cg(allow_start=False)
         card = selector.prepare(target)
+        if selector.repaired:
+            if native.selected_form() != source:
+                raise RuntimeError('恢复后台窗口期间原生形态发生变化，已取消此次切换。')
+            overlay, bounds = native.find_overlay(windows)
         card_ms = round((time.perf_counter() - started) * 1000, 1)
         trace_focus("card-ready")
         # The ImageControl bounds are the actual native sprite cell in physical pixels.
@@ -342,6 +346,9 @@ class Bridge:
 
     def request(self, action, command_id=None):
         if action == "quit":
+            source = 'control_quit' if command_id else 'tray_exit'
+            logging.info('Shutdown requested: source=%s command_id=%s', source, command_id)
+            self.update(shutdown_source=source)
             self.closing = True
             self.quit_command = command_id
             if not self.busy:

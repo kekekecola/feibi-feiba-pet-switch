@@ -12,7 +12,7 @@ from paths import RUNTIME, VERSION
 
 def collect():
     state = control.read_json(RUNTIME / 'bridge-status.json')
-    keys = ('version', 'phase', 'connection_state', 'hotkey', 'hotkey_registered', 'hotkey_error',
+    keys = ('version', 'phase', 'connection_state', 'shutdown_source', 'hotkey', 'hotkey_registered', 'hotkey_error',
             'tray_registered', 'tray_error', 'settings_error', 'update_error', 'form', 'native_visible', 'cg_visible', 'native_switch_confirmed', 'error', 'timings_ms')
     report = dict(version=VERSION, python=platform.python_version(), platform=platform.system(),
                   status={key:state.get(key) for key in keys},
