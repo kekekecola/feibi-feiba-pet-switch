@@ -1,0 +1,25 @@
+name: Keep only the latest installer
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+concurrency:
+  group: stable-release-downloads
+  cancel-in-progress: false
+jobs:
+  retain-latest:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python tools/retire_releases.py
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
