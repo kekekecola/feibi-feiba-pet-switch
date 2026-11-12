@@ -44,6 +44,21 @@ def initial_pointer(home):
 
 
 class DesktopUpdateTests(unittest.TestCase):
+    def test_requirement_newlines_do_not_rebuild_environment(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            current = initial_pointer(home)
+            (home / current['release'] / 'requirements.txt').write_bytes(b'Pillow==12.2.0\r\ncomtypes==1.5.0\r\n')
+            source = home / 'versions' / 'new'
+            source.mkdir()
+            (source / 'requirements.txt').write_bytes(b'Pillow==12.2.0\ncomtypes==1.5.0\n')
+            with patch.object(manager, 'run') as run, patch.object(manager.venv, 'EnvBuilder') as builder:
+                python = manager.prepare_python(home, source, current)
+                self.assertEqual(python, home / current['python'])
+                builder.assert_not_called()
+                self.assertEqual(run.call_count, 1)
+                self.assertNotIn('pip', run.call_args.args[0])
+
     def test_hotkey_parser(self):
         self.assertEqual(settings.parse_hotkey('alt+ctrl+h'), ('Ctrl+Alt+H', 0x4003, ord('H')))
         self.assertEqual(settings.parse_hotkey('F8')[2], 0x77)

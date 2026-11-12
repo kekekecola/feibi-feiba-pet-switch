@@ -148,7 +148,7 @@ def verify_source(source):
 def prepare_python(home, source, previous=None, wheelhouse=None):
     if previous:
         old = home / previous['release']
-        if (old / 'requirements.txt').read_bytes() == (source / 'requirements.txt').read_bytes():
+        if (old / 'requirements.txt').read_text(encoding='utf-8').splitlines() == (source / 'requirements.txt').read_text(encoding='utf-8').splitlines():
             python = home / previous['python']
             run([python, '-c', 'import PIL, uiautomation, comtypes, tkinter'], capture_output=True)
             return python
