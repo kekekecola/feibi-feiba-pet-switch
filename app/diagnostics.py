@@ -58,15 +58,17 @@ if __name__ == '__main__':
         except tk.TclError:
             pass
         root.title('菲比 / 菲八 · 状态与诊断')
-        root.geometry('700x570')
+        root.geometry('740x620')
+        root.minsize(640,450)
+        footer = ttk.Frame(root)
+        footer.pack(side='bottom',fill='x',padx=12,pady=8)
         tabs = ttk.Notebook(root)
         tabs.pack(fill='both', expand=True, padx=12, pady=12)
         overview, detail = ttk.Frame(tabs), ttk.Frame(tabs)
         tabs.add(overview,text='运行状态')
         tabs.add(detail,text='诊断详情')
-        summary = tk.StringVar()
-        ttk.Label(overview,textvariable=summary,justify='left',wraplength=640).pack(anchor='w',padx=14,pady=16)
-        ttk.Label(overview,text='诊断仅保存在本机，不会自动上传。窗口可见不等于图像已正常绘制。',wraplength=640).pack(anchor='w',padx=14)
+        summary = ScrolledText(overview,wrap='word',font=('Microsoft YaHei UI',10),relief='flat',padx=14,pady=12)
+        summary.pack(fill='both',expand=True)
         box = ScrolledText(detail, wrap='word')
         box.pack(fill='both', expand=True)
         def refresh():
@@ -84,12 +86,16 @@ if __name__ == '__main__':
                     '已安装 / 最近查询到的版本：' + str(updater.get('installed_version') or VERSION) + ' / ' + str(updater.get('latest_version') or '未知')]
             if error:
                 text += ['\n需要处理：' + str(error)]
-            summary.set('\n\n'.join(text))
+            text += ['诊断仅保存在本机，不会自动上传。窗口可见不等于图像已正常绘制。']
+            summary.configure(state='normal')
+            summary.delete('1.0','end')
+            summary.insert('1.0','\n\n'.join(text))
+            summary.configure(state='disabled')
             box.configure(state='normal')
             box.delete('1.0','end')
             box.insert('1.0',path.read_text(encoding='utf-8'))
             box.configure(state='disabled')
-        ttk.Button(root,text='刷新状态',command=refresh).pack(pady=(0,10))
+        ttk.Button(footer,text='刷新状态',command=refresh).pack(side='right')
         refresh()
         root.mainloop()
     else:
