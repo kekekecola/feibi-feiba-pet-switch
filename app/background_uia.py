@@ -321,7 +321,7 @@ class BackgroundSelection:
         except RuntimeError as error:
             if isinstance(error, msaa_controls.PetControlsError) and error.details['duplicates']:
                 raise
-            # No selection or CG has happened yet: rebuilding here cannot
+            # No native selection has happened yet: rebuilding here cannot
             # repeat a toggle which may already have taken effect.
             logging.warning('Pet controls stale; repairing helper before selection')
             prepare()

@@ -272,6 +272,33 @@ def _find_overlay_once(windows: Windows):
     for window in windows.enumerate():
         if not window.visible or not window.exstyle & 0x8:
             continue
+        try:
+            from uiautomation.uiautomation import _AutomationClient
+            uia = _AutomationClient.instance().IUIAutomation
+            condition = uia.CreateOrCondition(uia.CreatePropertyCondition(30003,50006),uia.CreatePropertyCondition(30003,50030))
+            cache = uia.CreateCacheRequest()
+            for prop in (30001,30003,30045):
+                cache.AddProperty(prop)
+            nodes = uia.ElementFromHandle(window.hwnd).FindAllBuildCache(4,condition,cache)
+            images = []
+            overlay_document = False
+            for i in range(nodes.Length):
+                node = nodes.GetElement(i)
+                if node.CachedControlType == 50030:
+                    value = node.GetCachedPropertyValue(30045)
+                    overlay_document |= isinstance(value,str) and 'avatar-overlay' in value
+                elif node.CachedControlType == 50006:
+                    rect = node.CachedBoundingRectangle
+                    images.append((rect.left,rect.top,rect.right,rect.bottom))
+            if overlay_document:
+                expected = preferences().get('avatar-overlay-mascot-width-px',112)*window.dpi/96
+                for rect in images:
+                    width,height=rect[2]-rect[0],rect[3]-rect[1]
+                    if width>0 and abs(width-expected)<=4 and abs(height/width-208/192)<.04:
+                        found.append((window,rect))
+                continue
+        except Exception:
+            pass  # Preserve the compatibility walk for older providers.
         root = auto.ControlFromHandle(window.hwnd)
         controls = list(walk_controls(root, 24))
         documents = [c for c, depth in controls

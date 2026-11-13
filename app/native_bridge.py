@@ -197,13 +197,6 @@ def transition(action, report):
     try:
         report(phase="preparing", form=source, target_form=target)
         ensure_cg(allow_start=False)
-        card = selector.prepare(target)
-        if selector.repaired:
-            if native.selected_form() != source:
-                raise RuntimeError('恢复后台窗口期间原生形态发生变化，已取消此次切换。')
-            overlay, bounds = native.find_overlay(windows)
-        card_ms = round((time.perf_counter() - started) * 1000, 1)
-        trace_focus("card-ready")
         # The ImageControl bounds are the actual native sprite cell in physical pixels.
         dpi = overlay.dpi
         native_width = bounds[2] - bounds[0]
@@ -212,18 +205,17 @@ def transition(action, report):
         y = round(bounds[1] - 40 * scale)
         recovery_journal.begin(overlay)
         journal_started = True
-        windows.user32.ShowWindow(overlay.hwnd, 0)
         hidden = True
 
         def keep_native_hidden():
             visibility_guard.run(windows.user32, overlay.hwnd, stop_guard, visibility_conflict, hide_cg)
 
         guard = threading.Thread(target=keep_native_hidden, daemon=True)
-        guard.start()
         report(phase="transition", cg_position=[x, y], native_image_rect=list(bounds),
-               dpi=dpi, native_pet_size_px=original_size, native_visible=False)
+               dpi=dpi, native_pet_size_px=original_size, native_visible=True)
         cg_action = "play-take-off" if target == "feiba" else "play-put-on"
-        playback = cg_ipc.Ticket(cg_action, hold=True, x=x, y=y, dpi=dpi, native_width=native_width)
+        playback = cg_ipc.Ticket(cg_action, hold=True, x=x, y=y, dpi=dpi, native_width=native_width,
+                                 native_handoff=control.read_json(recovery_journal.JOURNAL))
         deadline = time.monotonic() + 5
         while not cg_visible():
             if visibility_conflict.is_set():
@@ -232,7 +224,20 @@ def transition(action, report):
                 raise RuntimeError("CG 未开始显示，原生选择已取消。")
             time.sleep(0.04)
         first_cg_ms = round((time.perf_counter() - started) * 1000, 1)
+        guard.start()
+        report(native_visible=False,cg_visible=True)
         trace_focus("cg-visible")
+        # Pipeline safe, complete validation into the animation instead of
+        # making the user wait for a full accessibility scan before any feedback.
+        card = selector.prepare(target)
+        card_ms = round((time.perf_counter()-started)*1000,1)
+        trace_focus('card-ready')
+        if native.selected_form() != source or not windows.user32.IsWindow(overlay.hwnd):
+            raise RuntimeError('准备期间原生窗口或形态改变，已取消选择。')
+        identity = control.read_json(recovery_journal.JOURNAL)
+        user = recovery_journal.api()
+        if user.GetPropW(overlay.hwnd,recovery_journal.PROPERTY) != identity.get('nonce'):
+            raise RuntimeError('原生窗口身份改变，已取消选择。')
         selector.select(target, card)
         if visibility_conflict.is_set():
             raise RuntimeError('客户端窗口可见性冲突，已撤回CG；请查询当前形态。')
@@ -261,7 +266,7 @@ def transition(action, report):
             # the owned CG and restore native immediately, before waiting for IPC.
             if cg_ipc.hide_now():
                 stop_guard.set()
-                if guard:
+                if guard and guard.ident is not None:
                     guard.join(timeout=.2)
                 if journal_started:
                     recovery_journal.recover(cg_visible())
@@ -272,7 +277,7 @@ def transition(action, report):
         finally:
             if cg_hidden:
                 stop_guard.set()
-                if guard:
+                if guard and guard.ident is not None:
                     guard.join(timeout=1)
             elif hidden:
                 PENDING_RESTORE.append((windows, overlay, stop_guard))
@@ -594,6 +599,8 @@ def main():
     RUNTIME.mkdir(parents=True, exist_ok=True)
     native.dpi_awareness()
     if args.worker_server:
+        # UIA's persistent client must use MTA, not an idle STA with no UI pump.
+        sys.coinit_flags = 0
         sys.stdout.reconfigure(encoding='utf-8')
         maintenance.configure_logging(RUNTIME, worker=True)
         auto = native.automation()

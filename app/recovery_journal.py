@@ -65,3 +65,19 @@ def recover(cg_visible):
 def owner_dead():
     data = control.read_json(JOURNAL)
     return bool(data and not control.process_alive(data.get('owner_pid')))
+
+
+def hide_for_cg(expected):
+    """Player-side handoff: validate the journal before hiding any HWND."""
+    data = control.read_json(JOURNAL)
+    if not isinstance(expected,dict) or not data or any(expected.get(k)!=data.get(k) for k in ('hwnd','pid','nonce')):
+        return False
+    user = api()
+    hwnd=data['hwnd'];pid=wintypes.DWORD()
+    if not user.IsWindow(hwnd):
+        return False
+    user.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+    if pid.value!=data['pid'] or user.GetPropW(hwnd,PROPERTY)!=data['nonce']:
+        return False
+    user.ShowWindow(hwnd,0)
+    return not user.IsWindowVisible(hwnd)

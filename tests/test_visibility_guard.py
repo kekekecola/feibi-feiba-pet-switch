@@ -21,6 +21,19 @@ class VisibilityGuardTests(unittest.TestCase):
             obj.request('play-take-off',parameters={})
         self.assertEqual([call[0] for call in events.mock_calls],['draw','show'])
         events.draw.assert_called_once_with(obj.transition[0])
+
+    def test_bad_handoff_identity_never_shows_cg(self):
+        obj=player.Player.__new__(player.Player)
+        obj.closed=False;obj.preview=False;obj.phase='idle';obj.hold_timeout=None
+        obj.state=player.FormState('feibi');obj.root=Mock();obj.renderer=Mock()
+        obj.transition=[object(),object()];obj._draw=Mock();obj._ack=Mock()
+        obj._refresh_size_once=Mock();obj._write_status=Mock()
+        with patch.object(player,'native_pet_size',return_value=112),patch.object(player,'window_dpi',return_value=96), \
+             patch.object(player.recovery_journal,'hide_for_cg',return_value=False):
+            obj.request('play-take-off',parameters={'native_handoff':{'hwnd':123}})
+        obj.renderer.show.assert_not_called()
+        self.assertEqual(obj.phase,'idle')
+        self.assertIsNone(obj.state.target)
     def test_does_not_repeatedly_hide_already_hidden_window(self):
         user=Mock();user.IsWindow.return_value=True;user.IsWindowVisible.return_value=False
         stop=Mock();stop.wait.side_effect=[False]*10+[True]

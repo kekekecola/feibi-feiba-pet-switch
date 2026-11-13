@@ -592,6 +592,13 @@ class Player:
         # Submit a real frame before exposing the window, including the first
         # CG after startup when preview atlases are deliberately not loaded.
         self._draw(self.transition[0] if self.state.target == 'feiba' else self.transition[-1])
+        if parameters.get('native_handoff') is not None and not recovery_journal.hide_for_cg(parameters['native_handoff']):
+            self.state.cancel()
+            self.phase = 'idle'
+            self._ack(command_id,'failed','原生窗口身份核验失败，未显示CG')
+            self.current_command = None
+            self._write_status()
+            return
         self.renderer.show()
         self.root.update_idletasks()
         if parameters.get("x") is not None and parameters.get("y") is not None:
