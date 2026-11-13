@@ -2,7 +2,7 @@
 from pathlib import Path
 from PIL import Image
 root = Path(__file__).resolve().parents[1]
-with Image.open(root / 'app/assets/feibi.webp') as sheet:
+with Image.open(root / 'pets/feibi-jiubi/spritesheet.png') as sheet:
     head = sheet.convert('RGBA').crop((16, 8, 176, 145))
     head = head.crop(head.getchannel('A').getbbox())
     factor = min(252 / head.width, 252 / head.height)

@@ -31,6 +31,14 @@ def verify_assets():
             raise RuntimeError('Asset checksum mismatch: ' + relative)
 
 
+def pet_files(source):
+    metadata = json.loads((source / 'pet.json').read_text(encoding='utf-8'))
+    image = metadata.get('spritesheetPath')
+    if image not in ('spritesheet.png','spritesheet.webp') or not (source / image).is_file():
+        raise ValueError('Missing or unsupported pet sprite sheet: ' + source.name)
+    return ('pet.json', image)
+
+
 def install_pets(home, transaction=None, reuse=None):
     reuse = reuse or {}
     from pet_install_guard import PETS
@@ -40,11 +48,11 @@ def install_pets(home, transaction=None, reuse=None):
             continue
         target = home / 'pets' / source.name
         if transaction:
-            for name in ('pet.json', 'spritesheet.webp'):
+            for name in pet_files(source):
                 transaction.remember(target / name)
         if target.exists():
             unchanged = all((target / name).exists() and (target / name).read_bytes() == (source / name).read_bytes()
-                            for name in ('pet.json', 'spritesheet.webp'))
+                            for name in pet_files(source))
             if unchanged:
                 continue
             backup = home / 'pet-backups' / (source.name + '-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
@@ -52,7 +60,7 @@ def install_pets(home, transaction=None, reuse=None):
             shutil.copytree(target, backup)
             print('Previous pet backed up:', backup)
         target.mkdir(parents=True, exist_ok=True)
-        for name in ('pet.json', 'spritesheet.webp'):
+        for name in pet_files(source):
             shutil.copy2(source / name, target / name)
 
 

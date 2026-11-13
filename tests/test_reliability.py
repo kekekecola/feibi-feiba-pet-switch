@@ -50,7 +50,7 @@ class ReliabilityTests(unittest.TestCase):
                         target = home / 'pets' / pet / name
                         source.parent.mkdir(parents=True, exist_ok=True)
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        source.write_bytes(b'new pet')
+                        source.write_bytes(json.dumps({'spritesheetPath':'spritesheet.webp'}).encode() if name=='pet.json' else b'new pet')
                         target.write_bytes(b'old pet')
                         before[target] = target.read_bytes()
                 config = root / 'app' / 'runtime' / 'pet-roles.json'

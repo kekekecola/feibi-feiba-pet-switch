@@ -393,7 +393,7 @@ class Player:
         self.width = round(self.source_width * self.scale)
         self.height = round(self.source_height * self.scale)
         self.render_cache = {}
-        self.frames = self._load_atlases()
+        self.frames = self._load_atlases() if self.preview else {}
         self.transition = self._load_transition()
         root.title(TITLE)
         root.overrideredirect(True)
@@ -415,7 +415,8 @@ class Player:
         root.bind("<Button-3>", self._context_menu)
         root.bind("<Escape>", self.cancel_transition)
         root.protocol("WM_DELETE_WINDOW", self.close)
-        self._show_standard("idle", 0)
+        if self.preview:
+            self._show_standard("idle", 0)
         root.update_idletasks()
         if self.preview:
             self.hotkey = Win32Hotkey(root, lambda: self.request("toggle"))
@@ -431,7 +432,9 @@ class Player:
     def _load_atlases(self) -> dict:
         result = {}
         for form in FORM_NAMES:
-            with Image.open(ASSETS / f"{form}.webp") as image:
+            folder = APP_DIR.parent / 'pets' / (form + '-jiubi')
+            metadata = json.loads((folder / 'pet.json').read_text(encoding='utf-8'))
+            with Image.open(folder / metadata['spritesheetPath']) as image:
                 image = image.convert("RGBA")
                 if image.size != (1536, 1872):
                     raise ValueError(f"Unexpected {form} atlas size: {image.size}")
@@ -627,7 +630,8 @@ class Player:
             self.transition_after = None
         self.state.cancel()
         self.phase = "idle"
-        self._show_standard("idle", 0)
+        if self.preview:
+            self._show_standard("idle", 0)
         if not self.preview:
             self.renderer.hide()
         self._ack(self.current_command, "cancelled", "过渡已取消，保留原形态")

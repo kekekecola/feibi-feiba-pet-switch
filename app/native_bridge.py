@@ -23,6 +23,7 @@ import recovery_journal
 import isolated_calls
 import maintenance
 import tray
+import visibility_guard
 
 APP_DIR = Path(__file__).resolve().parent
 from paths import RUNTIME, VERSION
@@ -187,6 +188,7 @@ def transition(action, report):
     selector = background.BackgroundSelection(windows)
     original_foreground = windows.user32.GetForegroundWindow()
     stop_guard = threading.Event()
+    visibility_conflict = threading.Event()
     guard = None
     playback = None
     hidden = False
@@ -214,9 +216,7 @@ def transition(action, report):
         hidden = True
 
         def keep_native_hidden():
-            while not stop_guard.wait(0.025):
-                if windows.user32.IsWindow(overlay.hwnd):
-                    windows.user32.ShowWindow(overlay.hwnd, 0)
+            visibility_guard.run(windows.user32, overlay.hwnd, stop_guard, visibility_conflict, hide_cg)
 
         guard = threading.Thread(target=keep_native_hidden, daemon=True)
         guard.start()
@@ -228,12 +228,16 @@ def transition(action, report):
                                     stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
         deadline = time.monotonic() + 5
         while not cg_visible():
+            if visibility_conflict.is_set():
+                raise RuntimeError('客户端反复显示原生窗口，已中止过渡以避免频闪。')
             if playback.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError("CG 未开始显示，原生选择已取消。")
             time.sleep(0.04)
         first_cg_ms = round((time.perf_counter() - started) * 1000, 1)
         trace_focus("cg-visible")
         selector.select(target, card)
+        if visibility_conflict.is_set():
+            raise RuntimeError('客户端窗口可见性冲突，已撤回CG；请查询当前形态。')
         trace_focus("native-selected")
         output, error = playback.communicate(timeout=10)
         if playback.returncode != 0:
@@ -393,6 +397,7 @@ class Bridge:
                 result['worker_total_ms'] = round((time.perf_counter()-worker_started)*1000, 1)
             self.progress_path = None
             self.update(phase="idle", connection_state="ready", target_form=None, error=None, **result)
+            self.reconnect_failures = 0
             self.ack(command_id, "completed", "原生智能伙伴已切换。")
             logging.info("Native transition completed: %s", result)
         except Exception as error:
@@ -405,7 +410,8 @@ class Bridge:
                 background.release_helper_focus()
             except Exception:
                 logging.exception('Isolated worker recovery failed; heartbeat will retry')
-            self.next_reconnect = time.monotonic() + 8
+            self.reconnect_failures = getattr(self, 'reconnect_failures', 0) + 1
+            self.next_reconnect = time.monotonic() + min(60, 8 * 2 ** min(self.reconnect_failures - 1, 3))
             self.update(phase="error", connection_state="disconnected", target_form=None, error=str(error),
                         native_switch_confirmed=False,
                         form=native.selected_form(), cg_visible=control.status().get("visible", False))

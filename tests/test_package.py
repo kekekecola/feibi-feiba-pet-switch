@@ -31,12 +31,14 @@ class PackageTests(unittest.TestCase):
         from PIL import Image
         installer.verify_assets()
         for form, pet in [('feibi', 'feibi-jiubi'), ('feiba', 'feiba-jiubi')]:
-            image = ROOT / 'app' / 'assets' / (form + '.webp')
+            image = ROOT / 'pets' / pet / 'spritesheet.png'
             with Image.open(image) as sheet:
                 self.assertEqual(sheet.size, (1536, 1872))
                 self.assertEqual(sheet.mode, 'RGBA')
                 self.assertEqual(sheet.getchannel('A').getextrema(), (0, 255))
-            self.assertEqual(image.read_bytes(), (ROOT / 'pets' / pet / 'spritesheet.webp').read_bytes())
+            metadata=json.loads((ROOT / 'pets' / pet / 'pet.json').read_text(encoding='utf-8'))
+            self.assertEqual(metadata['spritesheetPath'],'spritesheet.png')
+            self.assertFalse((ROOT / 'app' / 'assets' / (form+'.webp')).exists())
         with Image.open(ROOT / 'app' / 'assets' / 'take-off.png') as cg:
             self.assertEqual(cg.size, (2880, 248))
             self.assertEqual(cg.getchannel('A').getextrema(), (0, 255))
