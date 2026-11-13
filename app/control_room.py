@@ -24,6 +24,28 @@ W, H = 1040, 700
 C = dict(ink='#45405E', muted='#746B84', accent='#7865AE', light='#EDE6FA', border='#E9E1F2', cream='#FFFCF7', green='#5C9B85')
 
 
+def resize_edge(x, y, width, height, grip=9):
+    vertical = 'n' if y < grip else 's' if y >= height-grip else ''
+    horizontal = 'w' if x < grip else 'e' if x >= width-grip else ''
+    return vertical + horizontal
+
+
+def resized_bounds(bounds, edge, dx, dy, minimum=832, maximum=3120):
+    """Scale the artwork uniformly, retaining the opposite corner/edge center."""
+    x, y, width, height = bounds
+    candidates = []
+    if 'e' in edge: candidates.append(width+dx)
+    if 'w' in edge: candidates.append(width-dx)
+    if 's' in edge: candidates.append((height+dy)*W/H)
+    if 'n' in edge: candidates.append((height-dy)*W/H)
+    desired = max(candidates, key=lambda value: abs(value-width)) if candidates else width
+    new_width = round(max(minimum, min(maximum, desired)))
+    new_height = round(new_width*H/W)
+    new_x = x+width-new_width if 'w' in edge else x if 'e' in edge else x+(width-new_width)//2
+    new_y = y+height-new_height if 'n' in edge else y if 's' in edge else y+(height-new_height)//2
+    return new_x, new_y, new_width, new_height
+
+
 def read(name):
     try:
         return json.loads((DATA / name).read_text(encoding='utf-8'))
@@ -42,8 +64,14 @@ class ControlRoom:
         self.root.overrideredirect(True)
         work=wintypes.RECT()
         user=ctypes.WinDLL('user32');user.SystemParametersInfoW(0x30,0,ctypes.byref(work),0)
-        self.scale=min(1.0,(work.right-work.left-32)/W,(work.bottom-work.top-32)/H)
+        available=min((work.right-work.left-32)/W,(work.bottom-work.top-32)/H)
+        saved_scale=read('control-room-window.json').get('scale',1.0)
+        if type(saved_scale) not in (int,float) or not .1 <= saved_scale <= 3:
+            saved_scale=1.0
+        self.scale=min(max(.8,saved_scale),available)
+        self.minimum_width=round(W*min(.8,available))
         self.pixel_w,self.pixel_h=round(W*self.scale),round(H*self.scale)
+        self.root.minsize(self.minimum_width,round(self.minimum_width*H/W))
         self.root.geometry(f'{self.pixel_w}x{self.pixel_h}+{work.left+(work.right-work.left-self.pixel_w)//2}+{work.top+(work.bottom-work.top-self.pixel_h)//2}')
         self.root.iconbitmap(str(HERE/'assets'/'feibi-tray.ico'))
         self.root.update_idletasks()
@@ -57,11 +85,12 @@ class ControlRoom:
         families = tkfont.families(self.root)
         self.family = next((f for f in ('幼圆','YouYuan') if f in families),'Microsoft YaHei UI')
         self.c = tk.Canvas(self.root,width=self.pixel_w,height=self.pixel_h,highlightthickness=0,bg=C['cream'])
-        self.c.pack()
+        self.c.pack(fill='both',expand=True)
         with Image.open(HERE/'ui_assets'/'control-room-background.png') as image:
-            self.bg = ImageTk.PhotoImage(image.resize((self.pixel_w,self.pixel_h),Image.Resampling.LANCZOS))
+            self.bg_source=image.copy()
         with Image.open(HERE/'assets'/'feibi-tray.ico') as image:
-            self.avatar = ImageTk.PhotoImage(image.resize((round(56*self.scale),round(56*self.scale)),Image.Resampling.LANCZOS))
+            self.avatar_source=image.copy()
+        self.resize_images()
         self.tab = {'hotkeys':0,'status':1,'diagnostics':2}.get(page,0)
         self.detail = False
         self.busy = False
@@ -71,12 +100,17 @@ class ControlRoom:
         self.last_snapshot = None
         self.children = []
         self.drag = None
+        self.resizing = None
+        self.resize_after = None
         state=read('bridge-status.json')
         self.bridge_pid=state.get('pid') if state.get('running') else None
         self.feedback = '保存后约 1 秒生效，冲突时保留当前按键。'
         self.entry_value = read('bridge-status.json').get('hotkey','F8')
         self.c.bind('<ButtonPress-1>',self.drag_start)
         self.c.bind('<B1-Motion>',self.drag_move)
+        self.c.bind('<ButtonRelease-1>',self.drag_end)
+        self.c.bind('<Motion>',self.pointer_move)
+        self.root.bind('<Configure>',self.configure_size)
         self.root.bind('<Escape>',lambda _:self.hide())
         self.root.protocol('WM_DELETE_WINDOW',self.hide)
         self.draw()
@@ -108,14 +142,88 @@ class ControlRoom:
         self.round(x,y,w,h,24,'#FFFEFC','#EEE7F2')
 
     def drag_start(self,event):
-        if event.y<72*self.scale:
+        edge=resize_edge(event.x,event.y,self.pixel_w,self.pixel_h)
+        if edge:
+            self.resizing=(edge,event.x_root,event.y_root,
+                           (self.root.winfo_x(),self.root.winfo_y(),self.pixel_w,self.pixel_h))
+            self.drag=None
+            self.c.grab_set()
+        elif event.y<72*self.scale:
             self.drag=(event.x_root-self.root.winfo_x(),event.y_root-self.root.winfo_y())
         else:
             self.drag=None
 
     def drag_move(self,event):
-        if self.drag:
+        if self.resizing:
+            edge,x,y,bounds=self.resizing
+            left,top,width,height=resized_bounds(bounds,edge,event.x_root-x,event.y_root-y,self.minimum_width)
+            self.root.geometry(f'{width}x{height}{left:+d}{top:+d}')
+        elif self.drag:
             self.root.geometry(f'+{event.x_root-self.drag[0]}+{event.y_root-self.drag[1]}')
+
+    def drag_end(self,event=None):
+        resizing=self.resizing is not None
+        self.resizing=None
+        self.drag=None
+        if resizing:
+            self.c.grab_release()
+            self.root.update_idletasks()
+            self.redraw_size()
+            DATA.mkdir(parents=True,exist_ok=True)
+            target=DATA/'control-room-window.json'
+            temporary=target.with_suffix('.'+uuid.uuid4().hex+'.tmp')
+            temporary.write_text(json.dumps({'scale':self.scale}),encoding='utf-8')
+            os.replace(temporary,target)
+
+    def pointer_move(self,event):
+        if self.resizing or self.drag:
+            return
+        edge=resize_edge(event.x,event.y,self.pixel_w,self.pixel_h)
+        cursor={'n':'size_ns','s':'size_ns','w':'size_we','e':'size_we',
+                'nw':'size_nw_se','se':'size_nw_se','ne':'size_ne_sw','sw':'size_ne_sw'}.get(edge)
+        if cursor is None:
+            items=self.c.find_withtag('current')
+            cursor='hand2' if items and self.c.tag_bind(items[-1],'<Button-1>') else ''
+        self.c.configure(cursor=cursor)
+
+    def resize_images(self):
+        self.bg=ImageTk.PhotoImage(self.bg_source.resize((self.pixel_w,self.pixel_h),Image.Resampling.LANCZOS))
+        side=max(1,round(56*self.scale))
+        self.avatar=ImageTk.PhotoImage(self.avatar_source.resize((side,side),Image.Resampling.LANCZOS))
+
+    def configure_size(self,event):
+        if event.widget is not self.root or (event.width,event.height)==(self.pixel_w,self.pixel_h):
+            return
+        # Coalesce Windows resize messages so artwork decoding never runs on
+        # every pointer sample. Source images stay in memory until GUI exit.
+        if self.resize_after:
+            return
+        self.resize_after=self.root.after(45,self.redraw_size)
+
+    def redraw_size(self):
+        if self.resize_after:
+            self.root.after_cancel(self.resize_after)
+            self.resize_after=None
+        width,height=self.root.winfo_width(),self.root.winfo_height()
+        if self.closed or width<2 or height<2 or (width,height)==(self.pixel_w,self.pixel_h):
+            return
+        focused=self.root.focus_get()
+        edit=focused is getattr(self,'entry',None) and self.tab==0
+        if self.tab==0 and hasattr(self,'entry') and self.entry.winfo_exists():
+            self.entry_value=self.entry.get()
+            insert=self.entry.index('insert')
+            selected=(self.entry.index('sel.first'),self.entry.index('sel.last')) if self.entry.selection_present() else None
+        scroll=self.children[0].yview()[0] if self.detail and self.children else None
+        self.pixel_w,self.pixel_h=width,height
+        self.scale=min(width/W,height/H)
+        self.resize_images()
+        self.draw()
+        if edit:
+            self.entry.focus_set()
+            self.entry.icursor(insert)
+            if selected:self.entry.selection_range(*selected)
+        if scroll is not None and self.children:
+            self.children[0].yview_moveto(scroll)
 
     def change_tab(self,index):
         if self.tab==0 and hasattr(self,'entry') and self.entry.winfo_exists():
@@ -340,6 +448,9 @@ class ControlRoom:
         logging.error('Control room callback failed',exc_info=(kind,error,traceback))
 
     def hide(self):
+        if self.resizing:
+            self.drag_end()
+        self.drag=None
         self.dismissed=True
         self.root.withdraw()
         self.heartbeat()
