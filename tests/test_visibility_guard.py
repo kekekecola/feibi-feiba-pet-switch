@@ -5,9 +5,22 @@ import threading
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 import visibility_guard
+import player
+from unittest.mock import patch
 
 
 class VisibilityGuardTests(unittest.TestCase):
+    def test_first_frame_is_drawn_before_window_is_shown(self):
+        obj=player.Player.__new__(player.Player)
+        obj.closed=False;obj.preview=False;obj.phase='idle';obj.hold_timeout=None
+        obj.state=player.FormState('feibi');obj.root=Mock();obj.renderer=Mock()
+        obj.transition=[object(),object()]
+        obj._refresh_size_once=Mock();obj._write_status=Mock();obj._advance_transition=Mock()
+        events=Mock();obj._draw=events.draw;obj.renderer.show=events.show
+        with patch.object(player,'native_pet_size',return_value=112),patch.object(player,'window_dpi',return_value=96):
+            obj.request('play-take-off',parameters={})
+        self.assertEqual([call[0] for call in events.mock_calls],['draw','show'])
+        events.draw.assert_called_once_with(obj.transition[0])
     def test_does_not_repeatedly_hide_already_hidden_window(self):
         user=Mock();user.IsWindow.return_value=True;user.IsWindowVisible.return_value=False
         stop=Mock();stop.wait.side_effect=[False]*10+[True]

@@ -588,6 +588,9 @@ class Player:
             return
         self.current_command = command_id
         self.phase = "transition"
+        # Submit a real frame before exposing the window, including the first
+        # CG after startup when preview atlases are deliberately not loaded.
+        self._draw(self.transition[0] if self.state.target == 'feiba' else self.transition[-1])
         self.renderer.show()
         self.root.update_idletasks()
         if parameters.get("x") is not None and parameters.get("y") is not None:
