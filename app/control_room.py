@@ -149,8 +149,8 @@ class ControlRoom:
         self.text(44,621,'大大陪伴',18,C['accent'])
         self.text(232,39,'菲比啾比  /  菲八啾比',16,C['muted'])
         close_area=self.round(954,18,48,48,14,'#F5EFFA')
-        close_a=self.c.create_line(971,35,985,49,fill='#77658F',width=2.5,capstyle='round')
-        close_b=self.c.create_line(971,49,985,35,fill='#77658F',width=2.5,capstyle='round')
+        close_a=self.c.create_line(967,31,989,53,fill='#77658F',width=3,capstyle='round')
+        close_b=self.c.create_line(967,53,989,31,fill='#77658F',width=3,capstyle='round')
         for item in (close_area,close_a,close_b):
             self.c.tag_bind(item,'<Button-1>',lambda _:self.hide())
             self.c.tag_bind(item,'<Enter>',lambda _:self.c.configure(cursor='hand2'))

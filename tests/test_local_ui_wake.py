@@ -16,7 +16,7 @@ class LocalUiWakeTests(unittest.TestCase):
             home=Path(folder)
             app=home/'versions'/'review'/'app';app.mkdir(parents=True)
             (home/'current.json').write_text('{}');(home/'launcher.py').touch()
-            self.assertEqual(paths.runtime_directory(app),home/'runtime')
+            self.assertEqual(paths.runtime_directory(app).resolve(),(home/'runtime').resolve())
 
     def test_user_closed_window_is_not_reopened_by_watchdog(self):
         bridge=native_bridge.Bridge.__new__(native_bridge.Bridge)
