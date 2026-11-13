@@ -79,37 +79,8 @@ def save_hotkey(value):
 
 
 def gui():
-    import tkinter as tk
-    from tkinter import ttk
-    import control
-    root = tk.Tk()
-    try:
-        root.iconbitmap(str(Path(__file__).parent / 'assets' / 'feibi-tray.ico'))
-    except tk.TclError:
-        pass
-    root.title('菲比 / 菲八 · 快捷键')
-    root.geometry('440x170')
-    try:
-        initial = load()['hotkey']
-    except (ValueError, OSError):
-        initial = 'F8'
-    text = tk.StringVar(value=initial)
-    ttk.Label(root, text='切换快捷键（默认 F8），例如 Ctrl+Alt+H').pack(pady=12)
-    ttk.Entry(root, textvariable=text, width=32).pack()
-    feedback = tk.StringVar(value='保存后约1秒生效；冲突时保留原快捷键。')
-    def apply():
-        try:
-            key = save_hotkey(text.get())
-            feedback.set('已请求改绑 ' + key + '，正在等待服务确认…')
-            root.after(1700, confirm)
-        except (ValueError, OSError) as error:
-            feedback.set(str(error))
-    def confirm():
-        state = control.read_json(RUNTIME / 'bridge-status.json')
-        feedback.set(state.get('hotkey_error') or ('当前生效：' + str(state.get('hotkey', '服务未运行'))))
-    ttk.Button(root, text='保存快捷键', command=apply).pack(pady=8)
-    ttk.Label(root, textvariable=feedback, wraplength=420).pack()
-    root.mainloop()
+    from control_room import run
+    run('hotkeys')
 
 
 if __name__ == '__main__':

@@ -312,6 +312,8 @@ class Bridge:
         self.pending_request = None
         self.pool = isolated_calls.WarmWorker([str(Path(sys.executable).with_name('python.exe')), str(APP_DIR / 'native_bridge.py'), '--worker-server'])
         self.request_meta = {}
+        self.room_processes = []
+        self.room_open_nonce = None
         self.next_reconnect = 0
         self.next_maintenance = 0
         self.state = {"running": True, "pid": os.getpid(), "phase": "idle",
@@ -363,10 +365,43 @@ class Bridge:
                                         capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
                 self.update(update_error=None if result.returncode == 0 else '无法启动更新任务')
                 return
-        script = 'diagnostics.py' if action == 'diagnose' else 'settings.py'
-        subprocess.Popen([str(Path(sys.executable).with_name('pythonw.exe')), str(APP_DIR / script), '--gui'],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=subprocess.CREATE_NO_WINDOW)
+        page = {'settings':'hotkeys','diagnose':'diagnostics'}.get(action)
+        self.open_room(page)
+
+    def open_room(self,page=None,retry=False):
+        nonce=uuid.uuid4().hex
+        self.room_open_nonce=nonce
+        write_json(RUNTIME/'control-room-request.json',dict(nonce=nonce,page=page))
+        self.room_processes=[p for p in self.room_processes if p.poll() is None]
+        if not self.room_processes:
+            command=[str(Path(sys.executable).with_name('pythonw.exe')),str(APP_DIR/'control_room.py')]
+            if page:command+=['--page',page]
+            self.room_processes.append(subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW))
+        user=ctypes.WinDLL('user32')
+        for process in self.room_processes:
+            user.AllowSetForegroundWindow(process.pid)
+        self.root.after(1800,lambda:self.verify_room(nonce,page,retry))
+
+    def verify_room(self,nonce,page,retried):
+        if self.closing or nonce!=self.room_open_nonce:
+            return
+        state=control.read_json(RUNTIME/'control-room-heartbeat.json')
+        if state.get('nonce')==nonce and (state.get('visible') or state.get('closed_by_user')) and time.time()-state.get('updated_at',0)<3:
+            self.update(control_room_error=None)
+            return
+        logging.warning('Control room did not acknowledge visible wake: %s',state)
+        if not retried:
+            self.close_room()
+            self.open_room(page,True)
+        else:
+            self.update(control_room_error='控制室未能显示，请查看control-room.log')
+
+    def close_room(self):
+        for process in self.room_processes:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=3)
 
     def request(self, action, command_id=None):
         if action == "quit":
@@ -495,7 +530,7 @@ class Bridge:
             return
         while not self.hotkey_events.empty():
             item = self.hotkey_events.get_nowait()
-            if isinstance(item, str) and item in ("diagnose", "settings", "update", "logs", "help"):
+            if isinstance(item, str) and item in ("controlroom", "diagnose", "settings", "update", "logs", "help"):
                 self.utility(item)
                 continue
             if isinstance(item, tuple):
@@ -567,7 +602,7 @@ class Bridge:
 
     def close(self):
         try:
-            for cleanup in (self.tray.close, self.hotkey.close, self.pool.close, hide_cg, recover_native_visibility, background.close):
+            for cleanup in (self.close_room, self.tray.close, self.hotkey.close, self.pool.close, hide_cg, recover_native_visibility, background.close):
                 try:
                     cleanup()
                 except Exception:

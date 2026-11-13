@@ -2,36 +2,16 @@
 import ctypes
 from ctypes import wintypes as W
 import threading
+import logging
 from pathlib import Path
 
 
 def menu_entries(state, updater=None, managed=False):
-    updater = updater or {}
-    names = {'feibi':'菲比啾比', 'feiba':'菲八啾比'}
-    form = state.get('form')
-    ready = state.get('phase') == 'idle' and state.get('connection_state') == 'ready' and form in names
-    label, action = ('戴帽 → 菲比啾比', 'put-on') if form == 'feiba' else ('摘帽 → 菲八啾比', 'take-off')
-    if form not in names:
-        label, action = '切换宠物形态', 'toggle'
-    entries = [dict(label='菲比啾比 / 菲八啾比  v' + state.get('version',''), enabled=False),
-               dict(label=status_label(state) + ' · 当前：' + names.get(form,'尚未识别'), enabled=False),
-               dict(label='切换快捷键：' + state.get('hotkey','F8'), enabled=False), None,
-               dict(id=1, label=label, action=action, enabled=ready), None,
-               dict(id=3, label='快捷键设置…', action='settings'),
-               dict(id=2, label='状态与诊断…', action='diagnose'),
-               dict(id=8, label='打开日志文件夹', action='logs'), None]
-    updating = updater.get('phase') in ('checking','downloading','preparing','applying')
-    entries += [dict(id=4, label='正在检查或安装更新…' if updating else '检查并安装更新',
-                     action='update', enabled=managed and not updating)]
-    if not managed:
-        entries.append(dict(label='自动更新尚未开启，详见项目说明', enabled=False))
-    elif updater.get('phase') == 'error':
-        entries.append(dict(label='上次更新失败，请查看状态与诊断', enabled=False))
-    elif updater.get('installed_version'):
-        entries.append(dict(label='已安装：v' + updater['installed_version'], enabled=False))
-    entries += [dict(id=9,label='使用说明与项目主页',action='help'), None,
-                dict(id=5,label='退出并停用 ' + state.get('hotkey','快捷键'),action='quit')]
-    return entries
+    return [dict(id=5,label='退出（停用 '+state.get('hotkey','快捷键')+'）',action='quit')]
+
+
+def event_action(notification):
+    return 'controlroom' if notification & 0xFFFF in (0x0201,0x0202,0x0203,0x0400,0x0401) else None
 
 
 def status_label(state):
@@ -155,10 +135,14 @@ class Tray:
                 u.DestroyMenu(handle)
         def callback(hwnd, message, wp, lp):
             if message == 0x8001:
-                if lp in (0x0205, 0x007B):
+                event = lp & 0xFFFF
+                if event_action(lp) or event in (0x0205,0x007B):
+                    logging.info("Tray input raw=%s event=%s",hex(lp),hex(event))
+                if event in (0x0205, 0x007B):
                     menu()
-                elif lp == 0x0203:
-                    self.events.put('diagnose')
+                elif event_action(lp):
+                    u.SetForegroundWindow(hwnd)
+                    self.events.put(event_action(lp))
                 return 0
             if message == 0x8002 or message == taskbar_created:
                 notify(add=message == taskbar_created)

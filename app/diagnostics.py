@@ -49,54 +49,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     path = write_report()
     if args.gui:
-        import tkinter as tk
-        from tkinter import ttk
-        from tkinter.scrolledtext import ScrolledText
-        root = tk.Tk()
-        try:
-            root.iconbitmap(str(Path(__file__).parent / 'assets' / 'feibi-tray.ico'))
-        except tk.TclError:
-            pass
-        root.title('菲比 / 菲八 · 状态与诊断')
-        root.geometry('740x620')
-        root.minsize(640,450)
-        footer = ttk.Frame(root)
-        footer.pack(side='bottom',fill='x',padx=12,pady=8)
-        tabs = ttk.Notebook(root)
-        tabs.pack(fill='both', expand=True, padx=12, pady=12)
-        overview, detail = ttk.Frame(tabs), ttk.Frame(tabs)
-        tabs.add(overview,text='运行状态')
-        tabs.add(detail,text='诊断详情')
-        summary = ScrolledText(overview,wrap='word',font=('Microsoft YaHei UI',10),relief='flat',padx=14,pady=12)
-        summary.pack(fill='both',expand=True)
-        box = ScrolledText(detail, wrap='word')
-        box.pack(fill='both', expand=True)
-        def refresh():
-            from tray import status_label
-            write_report()
-            report = collect()
-            state, updater = report['status'], report['updater']
-            names = {'feibi':'菲比啾比','feiba':'菲八啾比'}
-            error = state.get('hotkey_error') or state.get('settings_error') or state.get('error') or state.get('update_error') or updater.get('error')
-            text = [f"程序版本：{VERSION}", f"运行状态：{status_label(state) if report['process_alive'] and report['heartbeat_fresh'] else '服务未运行或心跳过期'}",
-                    '当前形态：' + names.get(state.get('form'),'尚未识别'),
-                    '切换快捷键：' + str(state.get('hotkey') or '未知') + ('（已注册）' if state.get('hotkey_registered') else '（未注册）'),
-                    '托盘图标：' + ('菲比啾比头像' if state.get('tray_icon_custom') else '系统备用图标'),
-                    '自动更新：' + {'current':'已是已知最新版本','checking':'正在检查','downloading':'正在下载','preparing':'准备新版本','applying':'正在应用','error':'检查或更新失败'}.get(updater.get('phase'),'尚未开启或未检查'),
-                    '已安装 / 最近查询到的版本：' + str(updater.get('installed_version') or VERSION) + ' / ' + str(updater.get('latest_version') or '未知')]
-            if error:
-                text += ['\n需要处理：' + str(error)]
-            text += ['诊断仅保存在本机，不会自动上传。窗口可见不等于图像已正常绘制。']
-            summary.configure(state='normal')
-            summary.delete('1.0','end')
-            summary.insert('1.0','\n\n'.join(text))
-            summary.configure(state='disabled')
-            box.configure(state='normal')
-            box.delete('1.0','end')
-            box.insert('1.0',path.read_text(encoding='utf-8'))
-            box.configure(state='disabled')
-        ttk.Button(footer,text='刷新状态',command=refresh).pack(side='right')
-        refresh()
-        root.mainloop()
+        from control_room import run
+        run('diagnostics')
     else:
         print(path)
