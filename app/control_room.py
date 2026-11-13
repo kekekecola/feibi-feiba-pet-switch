@@ -58,8 +58,10 @@ class ControlRoom:
         self.family = next((f for f in ('幼圆','YouYuan') if f in families),'Microsoft YaHei UI')
         self.c = tk.Canvas(self.root,width=self.pixel_w,height=self.pixel_h,highlightthickness=0,bg=C['cream'])
         self.c.pack()
-        self.bg = ImageTk.PhotoImage(Image.open(HERE/'ui_assets'/'control-room-background.png').resize((self.pixel_w,self.pixel_h),Image.Resampling.LANCZOS))
-        self.avatar = ImageTk.PhotoImage(Image.open(HERE/'assets'/'feibi-tray.ico').resize((round(56*self.scale),round(56*self.scale)),Image.Resampling.LANCZOS))
+        with Image.open(HERE/'ui_assets'/'control-room-background.png') as image:
+            self.bg = ImageTk.PhotoImage(image.resize((self.pixel_w,self.pixel_h),Image.Resampling.LANCZOS))
+        with Image.open(HERE/'assets'/'feibi-tray.ico') as image:
+            self.avatar = ImageTk.PhotoImage(image.resize((round(56*self.scale),round(56*self.scale)),Image.Resampling.LANCZOS))
         self.tab = {'hotkeys':0,'status':1,'diagnostics':2}.get(page,0)
         self.detail = False
         self.busy = False
@@ -84,6 +86,8 @@ class ControlRoom:
 
     def round(self,x,y,w,h,r=18,fill='#FFFFFF',outline='',width=1):
         points=[x+r,y,x+w-r,y,x+w,y,x+w,y+r,x+w,y+h-r,x+w,y+h,x+w-r,y+h,x+r,y+h,x,y+h,x,y+h-r,x,y+r,x,y]
+        if not fill:
+            return self.c.create_line(points+points[:4],smooth=True,splinesteps=24,fill=outline,width=width)
         return self.c.create_polygon(points,smooth=True,splinesteps=24,fill=fill,outline=outline,width=width)
 
     def text(self,x,y,value,size=20,color=None,bold=False,anchor='nw',width=None,latin=False):
@@ -144,8 +148,13 @@ class ControlRoom:
         self.text(44,591,'小小按键',18,C['muted'])
         self.text(44,621,'大大陪伴',18,C['accent'])
         self.text(232,39,'菲比啾比  /  菲八啾比',16,C['muted'])
-        self.text(980,40,'×',26,C['muted'],anchor='center',latin=True)
-        self.c.tag_bind(self.c.find_all()[-1],'<Button-1>',lambda _:self.hide())
+        close_area=self.round(954,18,48,48,14,'#F5EFFA')
+        close_a=self.c.create_line(971,35,985,49,fill='#77658F',width=2.5,capstyle='round')
+        close_b=self.c.create_line(971,49,985,35,fill='#77658F',width=2.5,capstyle='round')
+        for item in (close_area,close_a,close_b):
+            self.c.tag_bind(item,'<Button-1>',lambda _:self.hide())
+            self.c.tag_bind(item,'<Enter>',lambda _:self.c.configure(cursor='hand2'))
+            self.c.tag_bind(item,'<Leave>',lambda _:self.c.configure(cursor=''))
         state=read('bridge-status.json')
         key=state.get('hotkey','F8')
         self.round(788,28,158,33,16,'#F5F8F2','#E4ECDD')
@@ -345,6 +354,11 @@ class ControlRoom:
         user.SetForegroundWindow.argtypes=[wintypes.HWND]
         user.SetWindowPos.argtypes=[wintypes.HWND,wintypes.HWND,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.UINT]
         hwnd=user.GetAncestor(self.root.winfo_id(),2)
+        get=user.GetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p)==8 else user.GetWindowLongW
+        put=user.SetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p)==8 else user.SetWindowLongW
+        get.argtypes=[wintypes.HWND,ctypes.c_int];get.restype=ctypes.c_ssize_t
+        put.argtypes=[wintypes.HWND,ctypes.c_int,ctypes.c_ssize_t];put.restype=ctypes.c_ssize_t
+        put(hwnd,-20,(get(hwnd,-20)&~0x80)|0x40000)
         user.ShowWindow(hwnd,9)
         user.SetWindowPos(hwnd,wintypes.HWND(-1),0,0,0,0,0x53)
         user.SetWindowPos(hwnd,wintypes.HWND(-2),0,0,0,0,0x53)
