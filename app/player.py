@@ -20,6 +20,7 @@ from tkinter import messagebox
 
 from PIL import Image, ImageChops
 import recovery_journal
+from request_lifecycle import claim
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -721,6 +722,8 @@ class Player:
                 self._ack(command_id, "failed", "无效命令")
             elif not isinstance(command.get("issued_at"), (float, int)) or command["issued_at"] < self.started_at - 1 or time.time() - command["issued_at"] > 60:
                 self._ack(command_id, "failed", "命令已过期，请重新调用")
+            elif command['action'] in ('play-take-off','play-put-on') and not claim(RUNTIME / 'cg-decisions',command):
+                self._ack(command_id,'cancelled','过渡请求已取消或过期')
             else:
                 self.request(command["action"], command_id, command)
             path.unlink(missing_ok=True)

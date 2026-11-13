@@ -24,6 +24,7 @@ import isolated_calls
 import maintenance
 import tray
 import visibility_guard
+import cg_ipc
 
 APP_DIR = Path(__file__).resolve().parent
 from paths import RUNTIME, VERSION
@@ -115,8 +116,7 @@ def hide_cg():
     state = control.status()
     try:
         if state.get("running"):
-            subprocess.run(cg_command("hide"), capture_output=True, timeout=3,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
+            cg_ipc.Ticket("hide").communicate(timeout=3)
     except Exception:
         logging.exception("CG did not accept normal hide")
     windows = native.Windows()
@@ -223,9 +223,7 @@ def transition(action, report):
         report(phase="transition", cg_position=[x, y], native_image_rect=list(bounds),
                dpi=dpi, native_pet_size_px=original_size, native_visible=False)
         cg_action = "play-take-off" if target == "feiba" else "play-put-on"
-        playback = subprocess.Popen(cg_command(cg_action, "--hold", "--x", x, "--y", y,
-                                               "--dpi", dpi, "--native-width", native_width), stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
+        playback = cg_ipc.Ticket(cg_action, hold=True, x=x, y=y, dpi=dpi, native_width=native_width)
         deadline = time.monotonic() + 5
         while not cg_visible():
             if visibility_conflict.is_set():
@@ -259,6 +257,16 @@ def transition(action, report):
             logging.exception("Could not restore the previous main view/focus")
         cg_hidden = False
         try:
+            # Stop the visibility guard before the visual handoff. Withdraw
+            # the owned CG and restore native immediately, before waiting for IPC.
+            if cg_ipc.hide_now():
+                stop_guard.set()
+                if guard:
+                    guard.join(timeout=.2)
+                if journal_started:
+                    recovery_journal.recover(cg_visible())
+                    journal_started = False
+                    hidden = False
             hide_cg()
             cg_hidden = True
         finally:
@@ -268,8 +276,6 @@ def transition(action, report):
                     guard.join(timeout=1)
             elif hidden:
                 PENDING_RESTORE.append((windows, overlay, stop_guard))
-            if hidden and cg_hidden and windows.user32.IsWindow(overlay.hwnd):
-                windows.user32.ShowWindow(overlay.hwnd, 4)  # show without activation
             if journal_started and cg_hidden:
                 recovery_journal.recover(False)
             report(cg_visible=cg_visible(),
@@ -299,6 +305,7 @@ class Bridge:
         self.busy = False
         self.closing = False
         self.pending_request = None
+        self.pool = isolated_calls.WarmWorker([str(Path(sys.executable).with_name('python.exe')), str(APP_DIR / 'native_bridge.py'), '--worker-server'])
         self.request_meta = {}
         self.next_reconnect = 0
         self.next_maintenance = 0
@@ -392,7 +399,7 @@ class Bridge:
             self.progress_path = progress_path
             command += ['--progress-token', token]
             worker_started = time.perf_counter()
-            result = json.loads(isolated_calls.run(command, timeout=35 if not action else 22))
+            result = self.pool.run(action, token, timeout=35 if not action else 22)
             if action:
                 result['worker_total_ms'] = round((time.perf_counter()-worker_started)*1000, 1)
             self.progress_path = None
@@ -555,7 +562,7 @@ class Bridge:
 
     def close(self):
         try:
-            for cleanup in (self.tray.close, self.hotkey.close, hide_cg, recover_native_visibility, background.close):
+            for cleanup in (self.tray.close, self.hotkey.close, self.pool.close, hide_cg, recover_native_visibility, background.close):
                 try:
                     cleanup()
                 except Exception:
@@ -577,6 +584,7 @@ class Bridge:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--worker-server", action="store_true")
     parser.add_argument("--once", choices=("toggle", "take-off", "put-on"))
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--progress-token")
@@ -585,6 +593,31 @@ def main():
         parser.error("Invalid progress token")
     RUNTIME.mkdir(parents=True, exist_ok=True)
     native.dpi_awareness()
+    if args.worker_server:
+        sys.stdout.reconfigure(encoding='utf-8')
+        maintenance.configure_logging(RUNTIME, worker=True)
+        auto = native.automation()
+        with auto.UIAutomationInitializerInThread():
+            print(json.dumps({'ready':True}),flush=True)
+            for line in sys.stdin:
+                request = json.loads(line)
+                action, token = request.get('action'), request.get('token')
+                if action not in (None,'toggle','take-off','put-on') or not isinstance(token,str) or len(token)!=32 or any(c not in '0123456789abcdef' for c in token):
+                    return 1
+                try:
+                    native.selected_form()
+                    if action is None or not background.owned_window():
+                        background.prepare()
+                    ensure_cg()
+                    def report(**data):
+                        write_json(RUNTIME / ('progress-'+token+'.json'),dict(token=token,**data))
+                    result = transition(action,report) if action else {}
+                    print(json.dumps(dict(job=request['job'],result=result),ensure_ascii=False),flush=True)
+                except Exception as error:
+                    logging.exception('Warm worker request failed')
+                    print(json.dumps(dict(job=request['job'],error=str(error),control_details=getattr(error,'details',None)),ensure_ascii=False),flush=True)
+                    return 1
+        return 0
     if args.once or args.prepare_only:
         maintenance.configure_logging(RUNTIME, worker=True)
         if sys.stdout:

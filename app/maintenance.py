@@ -20,7 +20,7 @@ def cleanup(runtime, active_ids=(), now=None):
     cutoff = (time.time() if now is None else now) - RETENTION_SECONDS
     protected = set(active_ids)
     groups = {}
-    for folder in ('commands', 'bridge-commands', 'acks', 'bridge-acks', 'bridge-decisions'):
+    for folder in ('commands', 'bridge-commands', 'acks', 'bridge-acks', 'bridge-decisions', 'cg-decisions'):
         for path in (runtime / folder).glob('*.json'):
             if not re.fullmatch('[a-f0-9]{32}', path.stem):
                 continue

@@ -1,7 +1,7 @@
 """Do not endlessly fight a client which keeps showing its overlay."""
 def run(user, hwnd, stop, conflict, withdraw_cg):
     reappearances = 0
-    while not stop.wait(.05):
+    while not stop.wait(.01):
         if not user.IsWindow(hwnd):
             return
         if user.IsWindowVisible(hwnd):

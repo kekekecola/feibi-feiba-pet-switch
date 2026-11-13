@@ -186,7 +186,13 @@ def prepare():
         file_menu = root.MenuItemControl(searchDepth=24, AutomationId="application-menu-trigger-file-menu")
         if not native.exists(file_menu, 1):
             raise RuntimeError("找不到 GPT 新窗口菜单入口。")
-        invoke_background(file_menu)
+        try:
+            invoke_background(file_menu)
+        except Exception:
+            # Provisioning only: Chromium sometimes advertises a disabled
+            # legacy menu pattern while its custom titlebar accepts messages.
+            logging.warning('File menu pattern unavailable; using directed setup message')
+            click_background(file_menu, main)
         if not native.exists(menu, 1):
             # Only startup preparation may use the foreground native menu.
             # Ordinary F8 operations never enter this provisioning path.
@@ -235,6 +241,19 @@ def finish_prepare(helper):
     windows, _ = api()
     user = windows.user32
     user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    # A new window can restore the already-open Pets settings route. Avoid
+    # reopening profile menus over a selection page that is already ready.
+    try:
+        msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
+    except msaa_controls.PetControlsError as error:
+        if error.details['duplicates']:
+            raise
+    except RuntimeError:
+        pass
+    else:
+        invisible(helper)
+        user.EnableWindow(helper.hwnd, False)
+        return {'prepared':True, 'hwnd':helper.hwnd, 'reused':True}
     user.EnableWindow(helper.hwnd, True)
     r = native.automation().ControlFromHandle(helper.hwnd)
     section = r.ButtonControl(searchDepth=27, RegexName=ui_labels.pattern("pets"))

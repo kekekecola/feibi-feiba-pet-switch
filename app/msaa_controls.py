@@ -8,6 +8,81 @@ import pet_registry
 ACTION_ROLES = {34, 43, 44, 45}
 
 
+def cached_actions(hwnd, root, oleacc, IAccessible, VARIANT, names, roles):
+    """Batch-read all selection controls, then resolve raw MSAA by geometry.
+
+    No pointer input and no UIA default action. Any unsupported provider or
+    uncertain match falls back to the complete MSAA enumeration below.
+    """
+    from uiautomation.uiautomation import _AutomationClient
+    uia = _AutomationClient.instance().IUIAutomation
+    condition = uia.CreatePropertyCondition(30003,50000)
+    for kind in (50002,50007,50013):
+        condition = uia.CreateOrCondition(condition,uia.CreatePropertyCondition(30003,kind))
+    cache = uia.CreateCacheRequest()
+    for property_id in (30005,30001):
+        cache.AddProperty(property_id)
+    elements = uia.ElementFromHandle(hwnd).FindAllBuildCache(4,condition,cache)
+    candidates = {form:[] for form in names}
+    for index in range(elements.Length):
+        item = elements.GetElement(index)
+        name = item.CachedName
+        for form in names:
+            if pet_registry.matches(form,name,roles):
+                rect = item.CachedBoundingRectangle
+                candidates[form].append((name,(rect.left,rect.top,rect.right,rect.bottom)))
+    if any(len(items)!=1 for items in candidates.values()):
+        return None
+    resolved = {}
+    observed = {}
+    for form,items in candidates.items():
+        expected,rect = items[0]
+        x,y=(rect[0]+rect[2])//2,(rect[1]+rect[3])//2
+        seen,anchors=set(),{}
+        budget=[250]
+        def find(obj, child=0):
+            budget[0]-=1
+            if budget[0]<0:
+                return None
+            unknown=obj.QueryInterface(__import__('comtypes').IUnknown)
+            key=ctypes.cast(unknown,ctypes.c_void_p).value
+            anchors.setdefault(key,unknown)
+            identity=(key,child)
+            if identity in seen:
+                return None
+            seen.add(identity)
+            left,top,width,height=obj.accLocation(child)
+            if not (left<=x<left+width and top<=y<top+height):
+                return None
+            name=str(obj.accName(child) or '')
+            if pet_registry.normalized(name)==pet_registry.normalized(expected) and obj.accRole(child) in ACTION_ROLES and obj.accDefaultAction(child):
+                return obj,child
+            if child:
+                return None
+            count=int(obj.accChildCount)
+            for offset in range(0,min(count,8000),128):
+                size=min(128,count-offset);children=(VARIANT*size)();retrieved=ctypes.c_long()
+                oleacc.AccessibleChildren(obj,offset,size,children,ctypes.byref(retrieved))
+                for entry in children[:retrieved.value]:
+                    result=None
+                    if entry.vt in (9,13):
+                        result=find(entry.value.QueryInterface(IAccessible))
+                    elif entry.vt==3:
+                        result=find(obj,entry.value)
+                    if result is not None:
+                        return result
+                if budget[0]<0:
+                    return None
+            return None
+        action=find(root)
+        if action is None:
+            return None
+        resolved[form]=action
+        observed[form]=expected
+    pet_registry.observe_names(observed)
+    return resolved
+
+
 class PetControlsError(RuntimeError):
     def __init__(self, missing, duplicates, counts, limit=False):
         self.details = dict(missing=missing, duplicates=duplicates, matches=counts, traversal_limited=limit)
@@ -64,6 +139,12 @@ def pet_actions(hwnd, names):
     if result != 0 or not root:
         raise RuntimeError('无法读取后台原生 MSAA 控件。')
     roles = pet_registry.load()
+    try:
+        fast = cached_actions(hwnd,root,oleacc,IAccessible,VARIANT,names,roles)
+        if fast is not None:
+            return fast
+    except Exception:
+        pass  # Provider compatibility is handled by the full scan, not a click.
     collector = ActionCollector(names, roles)
     walked = set()
     limited = False
