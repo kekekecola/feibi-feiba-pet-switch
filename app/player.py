@@ -366,6 +366,7 @@ class Player:
         self.started_at = time.time()
         self.phase = "idle"
         self.current_command = None
+        self.playback_command = None
         self.last_completed_command = None
         self.hotkey = None
         self.transition_after = None
@@ -543,6 +544,7 @@ class Player:
                 self.hold_timeout = None
             self.phase = "idle"
             self.renderer.hide()
+            self.playback_command = None
             self._ack(command_id, "completed", "CG 覆盖层已撤回")
             self._write_status()
             return
@@ -600,6 +602,7 @@ class Player:
             self._write_status()
             return
         self.renderer.show()
+        self.playback_command = command_id
         self.root.update_idletasks()
         if parameters.get("x") is not None and parameters.get("y") is not None:
             self.renderer.move(parameters["x"], parameters["y"], self.width, self.height)
@@ -697,6 +700,7 @@ class Player:
             "pixel_height": self.height,
             "visible": self.renderer.visible(),
             "last_completed_command": self.last_completed_command,
+            "playback_command": self.playback_command,
             "window": {"x": self.renderer.position()[0], "y": self.renderer.position()[1], "width": self.width, "height": self.height},
             "updated_at": time.time(),
         })

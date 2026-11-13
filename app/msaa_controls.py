@@ -49,7 +49,7 @@ class ActionCollector:
         return {form:items[0] for form,items in self.matches.items()}
 
 
-def pet_actions(hwnd, names):
+def scan_actions(hwnd, inspect_action, include=lambda name: True):
     import comtypes
     from comtypes.automation import VARIANT
     from comtypes.gen.UIAutomationClient import IAccessible
@@ -63,8 +63,6 @@ def pet_actions(hwnd, names):
         ctypes.byref(IAccessible._iid_), ctypes.byref(root))
     if result != 0 or not root:
         raise RuntimeError('无法读取后台原生 MSAA 控件。')
-    roles = pet_registry.load()
-    collector = ActionCollector(names, roles)
     walked = set()
     limited = False
     visited = 0
@@ -79,9 +77,9 @@ def pet_actions(hwnd, names):
     def inspect(obj, child):
         name = str(obj.accName(child) or '')
         role = obj.accRole(child)
-        if role not in ACTION_ROLES or not any(pet_registry.matches(form,name,roles) for form in names):
+        if role not in ACTION_ROLES or not include(name):
             return
-        collector.add((identity(obj),child), name, role, obj.accDefaultAction(child), (obj,child))
+        inspect_action((identity(obj),child), name, role, obj.accDefaultAction(child), (obj,child))
 
     def walk(obj, depth=0):
         nonlocal visited, limited
@@ -116,7 +114,28 @@ def pet_actions(hwnd, names):
             return
 
     walk(root)
+    return limited
+
+
+def pet_actions(hwnd, names):
+    roles = pet_registry.load()
+    collector = ActionCollector(names, roles)
+    limited = scan_actions(hwnd, collector.add,
+        lambda name: any(pet_registry.matches(form, name, roles) for form in names))
     return collector.resolve(limited)
+
+
+def semantic_action(hwnd, pattern):
+    """Setup navigation across Chromium menu-item/button role differences."""
+    import re
+    matches = {}
+    def collect(identity, name, role, default_action, action):
+        if default_action and re.search(pattern, name):
+            matches[identity] = action
+    limited = scan_actions(hwnd, collect, lambda name: re.search(pattern, name) is not None)
+    if limited or len(matches) != 1:
+        raise RuntimeError('后台导航入口缺失或不唯一，未执行操作。')
+    return next(iter(matches.values()))
 
 
 def execute(action):

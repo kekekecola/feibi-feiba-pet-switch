@@ -18,8 +18,17 @@ class Ticket:
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / (self.command_id+'.json')
         temporary = target.with_suffix('.tmp')
-        temporary.write_text(json.dumps(dict(command_id=self.command_id,action=action,issued_at=time.time(),**parameters)),encoding='utf-8')
+        issued = time.time()
+        temporary.write_text(json.dumps(dict(command_id=self.command_id, action=action, issued_at=issued,
+            expires_at=issued + (3 if action.startswith('play-') else 30), **parameters)),encoding='utf-8')
         os.replace(temporary,target)
+
+    def is_visible(self):
+        state = control.status()
+        return (state.get('running') is True and state.get('visible') is True
+                and state.get('playback_command') == self.command_id
+                and state.get('phase') in ('transition', 'holding')
+                and time.time() - state.get('updated_at', 0) < 3)
 
     def poll(self):
         ack = control.read_json(self.path)

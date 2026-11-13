@@ -160,7 +160,7 @@ def restore_setup_focus(target, helper, original_main=None):
         time.sleep(0.06)
 
 
-def prepare():
+def prepare(rebuild=True):
     existing = owned_window()
     if existing:
         try:
@@ -175,7 +175,18 @@ def prepare():
             windows.user32.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
             windows.user32.EnableWindow(existing.hwnd, False)
             return {"prepared": True, "hwnd": existing.hwnd, "reused": True}
-        return finish_prepare(existing)
+        try:
+            return finish_prepare(existing)
+        except msaa_controls.PetControlsError:
+            raise
+        except RuntimeError:
+            if not rebuild:
+                raise
+            # A stale Chromium renderer can retain a marked HWND indefinitely.
+            # Replace our helper once; never close or navigate the user's view.
+            logging.warning('Background navigation failed; replacing owned helper once')
+            close()
+            return prepare(rebuild=False)
     windows, _ = api()
     main = windows.main()
     foreground = windows.user32.GetForegroundWindow()
@@ -237,7 +248,61 @@ def prepare():
             windows.user32.SetForegroundWindow(foreground)
 
 
+def setup_control(root, key, timeout=.2):
+    # Client releases expose the same entry as either a menu item, button or tab.
+    kinds = ('ButtonControl', 'TabItemControl') if key == 'pets' else ('MenuItemControl', 'ButtonControl')
+    for kind in kinds:
+        control = getattr(root, kind)(searchDepth=28, RegexName=ui_labels.pattern(key))
+        if native.exists(control, timeout):
+            return control
+    return None
+
+
+def navigate_setup(root, helper, key, destination):
+    """One semantic action, observed result, then one setup-only message fallback."""
+    control = setup_control(root, key)
+    if control is None:
+        raise RuntimeError('后台导航入口未就绪：' + key)
+    try:
+        msaa_controls.execute(msaa_controls.semantic_action(helper.hwnd, ui_labels.pattern(key)))
+    except Exception:
+        try:
+            invoke_background(control)
+        except Exception:
+            logging.warning('Setup navigation pattern unavailable: %s', key)
+            click_background(control, helper)
+            if not destination():
+                raise RuntimeError('后台导航没有响应：' + key)
+            return
+    if destination():
+        return
+    # Some providers advertise an action which is a no-op. Do not double-toggle
+    # an already-open menu; re-observe the destination before sending messages.
+    click_background(control, helper)
+    if not destination():
+        raise RuntimeError('后台导航没有响应：' + key)
+
+
 def finish_prepare(helper):
+    windows, _ = api()
+    user = windows.user32
+    user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    user.EnableWindow(helper.hwnd, True)
+    # Alpha-zero Chromium pages can stop publishing/updating their accessibility
+    # tree on other GPUs. Allow initialization at alpha 1, without activation.
+    user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user.SetLayeredWindowAttributes(helper.hwnd, 0, 1, 2)
+    user.SetWindowPos(helper.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0013 | 0x0040)
+    try:
+        return _finish_prepare(helper)
+    finally:
+        invisible(helper)
+        user.SetWindowPos(helper.hwnd, wintypes.HWND(-2), 0, 0, 0, 0, 0x0013)
+        user.EnableWindow(helper.hwnd, False)
+
+
+def _finish_prepare(helper):
     windows, _ = api()
     user = windows.user32
     user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
@@ -256,34 +321,37 @@ def finish_prepare(helper):
         return {'prepared':True, 'hwnd':helper.hwnd, 'reused':True}
     user.EnableWindow(helper.hwnd, True)
     r = native.automation().ControlFromHandle(helper.hwnd)
-    section = r.ButtonControl(searchDepth=27, RegexName=ui_labels.pattern("pets"))
-    if not native.exists(section, 0.5):
-        profile = r.ButtonControl(searchDepth=27, RegexName=ui_labels.pattern("profile"))
-        if not native.exists(profile, 1):
-            # A brand-new, fully transparent Chromium window may never publish
-            # its first accessibility tree. Briefly allow a nearly-transparent
-            # frame, without activation; hide it completely after initialization.
-            user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
-                ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-            user.SetLayeredWindowAttributes(helper.hwnd, 0, 1, 2)
-            user.SetWindowPos(helper.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0013 | 0x0040)
-            try:
-                if not native.exists(profile, 8):
-                    raise RuntimeError("辅助 GPT 窗口尚未加载完成。")
-            finally:
-                user.SetLayeredWindowAttributes(helper.hwnd, 0, 0, 2)
-                user.SetWindowPos(helper.hwnd, wintypes.HWND(-2), 0, 0, 0, 0, 0x0013)
-        settings = r.MenuItemControl(searchDepth=28, RegexName=ui_labels.pattern("settings"))
-        if not native.exists(settings, 0.2):
-            click_background(profile, helper)
-        if not native.exists(settings, 3):
-            raise RuntimeError("后台设置菜单未打开。")
-        invoke_background(settings)
-        if not native.exists(section, 1):
-            click_background(settings, helper)
-        if not native.exists(section, 3):
-            raise RuntimeError("后台设置页面未就绪。")
-    invoke_background(section)
+    # New windows may asynchronously restore the settings route. Wait for a
+    # usable route rather than treating its temporary blank tree as menu failure.
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
+            return {'prepared':True, 'hwnd':helper.hwnd, 'reused':True}
+        except msaa_controls.PetControlsError as error:
+            if error.details['duplicates']:
+                raise
+        except RuntimeError:
+            pass
+        if (setup_control(r, 'pets', .1) is not None
+                or setup_control(r, 'settings', .1) is not None
+                or setup_control(r, 'profile', .1) is not None):
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('辅助 GPT 窗口尚未加载完成。')
+        time.sleep(.15)
+    if setup_control(r, 'pets') is None:
+        # A pre-existing profile menu must be used directly, not toggled closed.
+        if setup_control(r, 'settings') is None:
+            if setup_control(r, 'profile', 2) is None:
+                raise RuntimeError('辅助 GPT 窗口尚未加载完成。')
+            navigate_setup(r, helper, 'profile', lambda: setup_control(r, 'settings', .6) is not None)
+        navigate_setup(r, helper, 'settings', lambda: setup_control(r, 'pets', .6) is not None)
+    section = setup_control(r, 'pets')
+    try:
+        msaa_controls.execute(msaa_controls.semantic_action(helper.hwnd, ui_labels.pattern('pets')))
+    except RuntimeError:
+        invoke_background(section)
     try:
         msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
     except RuntimeError:
@@ -314,13 +382,15 @@ class BackgroundSelection:
         self.root = native.automation().ControlFromHandle(self.window.hwnd)
         self.foreground_before = windows.user32.GetForegroundWindow()
 
-    def prepare(self, target):
+    def prepare(self, target, repair=True):
         self.repaired = False
         try:
             return msaa_controls.pet_actions(self.window.hwnd, native.PET_NAMES)[target]
         except RuntimeError as error:
             if isinstance(error, msaa_controls.PetControlsError) and error.details['duplicates']:
                 raise
+            if not repair:
+                raise RuntimeError('后台宠物页面失效，本次切换已取消；后台将重新准备，请就绪后再按快捷键。') from error
             # No native selection has happened yet: rebuilding here cannot
             # repeat a toggle which may already have taken effect.
             logging.warning('Pet controls stale; repairing helper before selection')
@@ -333,12 +403,14 @@ class BackgroundSelection:
             self.repaired = True
             return msaa_controls.pet_actions(window.hwnd, native.PET_NAMES)[target]
 
-    def select(self, target, card):
+    def select(self, target, card, before_action=None):
         user = self.windows.user32
         user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
         user.EnableWindow(self.window.hwnd, False)
         try:
             previous_id = native.preferences().get('selected-avatar-id')
+            if before_action:
+                before_action()
             msaa_controls.execute(card)
             deadline = time.monotonic() + 6
             while time.monotonic() < deadline:

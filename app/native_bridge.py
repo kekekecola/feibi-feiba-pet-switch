@@ -167,6 +167,11 @@ def recover_native_visibility():
         PENDING_RESTORE.remove(recovery)
 
 
+def confirm_playback(playback, conflict):
+    if conflict.is_set() or not playback.is_visible() or not cg_visible():
+        raise RuntimeError('本次CG已撤回或未显示，已取消原生选择。')
+
+
 def transition(action, report):
     started = time.perf_counter()
     source = native.selected_form()
@@ -217,7 +222,7 @@ def transition(action, report):
         playback = cg_ipc.Ticket(cg_action, hold=True, x=x, y=y, dpi=dpi, native_width=native_width,
                                  native_handoff=control.read_json(recovery_journal.JOURNAL))
         deadline = time.monotonic() + 5
-        while not cg_visible():
+        while not (playback.is_visible() and cg_visible()):
             if visibility_conflict.is_set():
                 raise RuntimeError('客户端反复显示原生窗口，已中止过渡以避免频闪。')
             if playback.poll() is not None or time.monotonic() >= deadline:
@@ -229,7 +234,8 @@ def transition(action, report):
         trace_focus("cg-visible")
         # Pipeline safe, complete validation into the animation instead of
         # making the user wait for a full accessibility scan before any feedback.
-        card = selector.prepare(target)
+        # Repair is a connection operation, never an unbounded part of a CG.
+        card = selector.prepare(target, repair=False)
         card_ms = round((time.perf_counter()-started)*1000,1)
         trace_focus('card-ready')
         if native.selected_form() != source or not windows.user32.IsWindow(overlay.hwnd):
@@ -238,7 +244,7 @@ def transition(action, report):
         user = recovery_journal.api()
         if user.GetPropW(overlay.hwnd,recovery_journal.PROPERTY) != identity.get('nonce'):
             raise RuntimeError('原生窗口身份改变，已取消选择。')
-        selector.select(target, card)
+        selector.select(target, card, before_action=lambda: confirm_playback(playback, visibility_conflict))
         if visibility_conflict.is_set():
             raise RuntimeError('客户端窗口可见性冲突，已撤回CG；请查询当前形态。')
         trace_focus("native-selected")
@@ -286,6 +292,7 @@ def transition(action, report):
             report(cg_visible=cg_visible(),
                    native_visible=bool(windows.user32.IsWindowVisible(overlay.hwnd)))
             if playback and playback.poll() is None:
+                playback.terminate()
                 try:
                     playback.communicate(timeout=3)
                 except subprocess.TimeoutExpired:
@@ -315,6 +322,7 @@ class Bridge:
         self.room_processes = []
         self.room_open_nonce = None
         self.next_reconnect = 0
+        self.next_probe = 0
         self.next_maintenance = 0
         self.state = {"running": True, "pid": os.getpid(), "phase": "idle",
                       "native_bridge_configured": True, "native_switch_confirmed": False,
@@ -445,6 +453,7 @@ class Bridge:
             self.progress_path = None
             self.update(phase="idle", connection_state="ready", target_form=None, error=None, control_details=None, **result)
             self.reconnect_failures = 0
+            self.next_probe = time.monotonic() + 20
             self.ack(command_id, "completed", "原生智能伙伴已切换。")
             logging.info("Native transition completed: %s", result)
         except Exception as error:
@@ -461,7 +470,8 @@ class Bridge:
             self.next_reconnect = time.monotonic() + min(60, 8 * 2 ** min(self.reconnect_failures - 1, 3))
             self.update(phase="error", connection_state="disconnected", target_form=None, error=str(error),
                         native_switch_confirmed=False,
-                        control_details=getattr(error,"details",None), form=native.selected_form(), cg_visible=control.status().get("visible", False))
+                        control_details=getattr(error,"details",None), form=native.selected_form(),
+                        native_visible=None, cg_visible=cg_visible())
             self.ack(command_id, "failed", str(error))
         finally:
             path = self.progress_path
@@ -490,7 +500,8 @@ class Bridge:
                     self.update(phase='recovering_native')
                     return
             if (self.state.get("connection_state") == "ready"
-                    and background.owned_window() and control.status().get("running")):
+                    and background.owned_window() and control.status().get("running")
+                    and time.monotonic() < self.next_probe):
                 return
             self.update(connection_state="disconnected", native_switch_confirmed=False)
             # Keep F8 alive while GPT is closed; initialize only after a primary window exists.
