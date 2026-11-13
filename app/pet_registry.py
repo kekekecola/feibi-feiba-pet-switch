@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import uuid
+import re
+import unicodedata
 
 import control
 
@@ -64,9 +66,15 @@ def bind(form, pet_id):
 
 def matches(form, text, roles=None):
     role = (load() if roles is None else roles)[form]
-    description = role.get('description', '')
-    return (text == role['name'] or text.startswith(role['name'] + ' ')
+    text = normalized(text)
+    name = normalized(role['name'])
+    description = normalized(role.get('description', ''))
+    return (text == name or text.startswith(name + ' ')
             or bool(description and text.endswith(description)))
+
+
+def normalized(text):
+    return re.sub(r'\s+', ' ', unicodedata.normalize('NFKC', str(text))).strip()
 
 
 def observe_names(names):

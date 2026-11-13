@@ -3,6 +3,51 @@ import ctypes
 from ctypes import wintypes
 import pet_registry
 
+# Standard MSAA selection controls. Text/image descendants are deliberately
+# excluded even when Chromium advertises a click action on them.
+ACTION_ROLES = {34, 43, 44, 45}
+
+
+class PetControlsError(RuntimeError):
+    def __init__(self, missing, duplicates, counts, limit=False):
+        self.details = dict(missing=missing, duplicates=duplicates, matches=counts, traversal_limited=limit)
+        parts = []
+        if missing:
+            parts.append('宠物选择页未找到：' + '、'.join(missing) + '；请确认两只均已导入且名称与配置一致')
+        if duplicates:
+            parts.append('存在同名可操作条目：' + '、'.join(duplicates) + '；请选定保留的一套或改成唯一名称')
+        if limit:
+            parts.append('控件树超过读取限制，不能确认唯一目标')
+        super().__init__('；'.join(parts) + '。尚未选择宠物或播放CG。')
+
+
+class ActionCollector:
+    def __init__(self, names, roles):
+        self.names, self.roles = names, roles
+        self.matches = {form:[] for form in names}
+        self.observed = {}
+        self.seen = set()
+
+    def add(self, identity, name, role, default_action, action):
+        if identity in self.seen:
+            return
+        self.seen.add(identity)
+        if role not in ACTION_ROLES or not default_action:
+            return
+        for form in self.names:
+            if pet_registry.matches(form, name, self.roles):
+                self.matches[form].append(action)
+                self.observed[form] = name
+
+    def resolve(self, limited=False):
+        counts = {self.names[form]:len(items) for form,items in self.matches.items()}
+        missing = [self.names[form] for form,items in self.matches.items() if not items]
+        duplicates = [self.names[form]+'（'+str(len(items))+'项）' for form,items in self.matches.items() if len(items)>1]
+        if missing or duplicates or limited:
+            raise PetControlsError(missing, duplicates, counts, limited)
+        pet_registry.observe_names(self.observed)
+        return {form:items[0] for form,items in self.matches.items()}
+
 
 def pet_actions(hwnd, names):
     import comtypes
@@ -19,48 +64,59 @@ def pet_actions(hwnd, names):
     if result != 0 or not root:
         raise RuntimeError('无法读取后台原生 MSAA 控件。')
     roles = pet_registry.load()
-    found = {}
-    observed = {}
-    ambiguous = set()
+    collector = ActionCollector(names, roles)
+    walked = set()
+    limited = False
     visited = 0
+    anchors = {}
+
+    def identity(obj):
+        unknown = obj.QueryInterface(comtypes.IUnknown)
+        key = ctypes.cast(unknown, ctypes.c_void_p).value
+        anchors.setdefault(key, unknown)  # Keep identities alive for this scan.
+        return key
 
     def inspect(obj, child):
         name = str(obj.accName(child) or '')
-        for form, label in names.items():
-            # Chromium exposes clickable text descendants too. Only the actual
-            # pushbutton is a candidate; duplicate cards still fail closed.
-            if pet_registry.matches(form, name, roles) and obj.accRole(child) == 43 and obj.accDefaultAction(child):
-                if form in found:
-                    ambiguous.add(form)
-                found[form] = (obj, child)
-                observed[form] = name
+        role = obj.accRole(child)
+        if role not in ACTION_ROLES or not any(pet_registry.matches(form,name,roles) for form in names):
+            return
+        collector.add((identity(obj),child), name, role, obj.accDefaultAction(child), (obj,child))
 
     def walk(obj, depth=0):
-        nonlocal visited
+        nonlocal visited, limited
+        key = identity(obj)
+        if key in walked:
+            return
+        walked.add(key)
         visited += 1
-        if depth > 30 or visited > 4000:
+        if depth > 40 or visited > 8000:
+            limited = True
             return
         try:
             inspect(obj, 0)
-            count = min(int(obj.accChildCount), 200)
+            count = int(obj.accChildCount)
             if count <= 0:
                 return
-            children = (VARIANT * count)()
-            retrieved = ctypes.c_long()
-            oleacc.AccessibleChildren(obj, 0, count, children, ctypes.byref(retrieved))
-            for child in children[:retrieved.value]:
-                if child.vt in (9, 13):
-                    walk(child.value.QueryInterface(IAccessible), depth + 1)
-                elif child.vt == 3:
-                    inspect(obj, child.value)
+            for offset in range(0, min(count,8000),128):
+                size = min(128,count-offset)
+                children = (VARIANT * size)()
+                retrieved = ctypes.c_long()
+                oleacc.AccessibleChildren(obj, offset, size, children, ctypes.byref(retrieved))
+                for child in children[:retrieved.value]:
+                    if child.vt in (9, 13):
+                        walk(child.value.QueryInterface(IAccessible), depth + 1)
+                    elif child.vt == 3:
+                        inspect(obj, child.value)
+                if visited > 8000:
+                    break
+            if count>8000:
+                limited=True
         except comtypes.COMError:
             return
 
     walk(root)
-    if ambiguous or set(found) != set(names):
-        raise RuntimeError('后台 MSAA 宠物动作未就绪；已取消，不采用抢焦点的备用操作。')
-    pet_registry.observe_names(observed)
-    return found
+    return collector.resolve(limited)
 
 
 def execute(action):

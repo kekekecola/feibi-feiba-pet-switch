@@ -166,7 +166,9 @@ def prepare():
         try:
             msaa_controls.pet_actions(existing.hwnd, native.PET_NAMES)
             ready = True
-        except RuntimeError:
+        except RuntimeError as error:
+            if isinstance(error, msaa_controls.PetControlsError) and error.details['duplicates']:
+                raise
             ready = False
         if ready:
             windows, _ = api()
@@ -267,7 +269,7 @@ def finish_prepare(helper):
         msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
     except RuntimeError:
         click_background(section, helper)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 12
         while True:
             try:
                 msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
@@ -275,7 +277,7 @@ def finish_prepare(helper):
             except RuntimeError:
                 if time.monotonic() >= deadline:
                     raise
-                time.sleep(.15)
+                time.sleep(.4)
     invisible(helper)
     user.EnableWindow(helper.hwnd, False)
     return {"prepared": True, "hwnd": helper.hwnd, "reused": False}
@@ -297,7 +299,9 @@ class BackgroundSelection:
         self.repaired = False
         try:
             return msaa_controls.pet_actions(self.window.hwnd, native.PET_NAMES)[target]
-        except RuntimeError:
+        except RuntimeError as error:
+            if isinstance(error, msaa_controls.PetControlsError) and error.details['duplicates']:
+                raise
             # No selection or CG has happened yet: rebuilding here cannot
             # repeat a toggle which may already have taken effect.
             logging.warning('Pet controls stale; repairing helper before selection')

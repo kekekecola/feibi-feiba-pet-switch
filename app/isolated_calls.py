@@ -1,5 +1,12 @@
 """A bounded subprocess boundary around potentially blocking COM providers."""
 import subprocess
+import json
+
+
+class WorkerError(RuntimeError):
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details
 
 
 def run(command, timeout=18):
@@ -18,5 +25,10 @@ def run(command, timeout=18):
             process.wait(timeout=2)
         raise TimeoutError('原生控件调用超时，已中断隔离进程。') from None
     if process.returncode:
-        raise RuntimeError((stdout or stderr).decode('utf-8', 'replace')[-800:])
+        message = (stdout or stderr).decode('utf-8', 'replace')[-2000:]
+        try:
+            data = json.loads(message)
+        except ValueError:
+            raise WorkerError(message) from None
+        raise WorkerError(data.get('error',message), data.get('control_details'))
     return stdout.decode('utf-8')

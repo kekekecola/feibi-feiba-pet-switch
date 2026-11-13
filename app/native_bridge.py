@@ -396,7 +396,7 @@ class Bridge:
             if action:
                 result['worker_total_ms'] = round((time.perf_counter()-worker_started)*1000, 1)
             self.progress_path = None
-            self.update(phase="idle", connection_state="ready", target_form=None, error=None, **result)
+            self.update(phase="idle", connection_state="ready", target_form=None, error=None, control_details=None, **result)
             self.reconnect_failures = 0
             self.ack(command_id, "completed", "原生智能伙伴已切换。")
             logging.info("Native transition completed: %s", result)
@@ -414,7 +414,7 @@ class Bridge:
             self.next_reconnect = time.monotonic() + min(60, 8 * 2 ** min(self.reconnect_failures - 1, 3))
             self.update(phase="error", connection_state="disconnected", target_form=None, error=str(error),
                         native_switch_confirmed=False,
-                        form=native.selected_form(), cg_visible=control.status().get("visible", False))
+                        control_details=getattr(error,"details",None), form=native.selected_form(), cg_visible=control.status().get("visible", False))
             self.ack(command_id, "failed", str(error))
         finally:
             path = self.progress_path
@@ -604,7 +604,7 @@ def main():
             return 0
         except Exception as error:
             logging.exception("One-shot failed")
-            print(json.dumps({"error": str(error)}, ensure_ascii=False))
+            print(json.dumps({"error": str(error), "control_details": getattr(error,"details",None)}, ensure_ascii=False))
             return 1
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
