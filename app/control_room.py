@@ -87,7 +87,7 @@ class ControlRoom:
         self.c = tk.Canvas(self.root,width=self.pixel_w,height=self.pixel_h,highlightthickness=0,bg=C['cream'])
         self.c.pack(fill='both',expand=True)
         with Image.open(HERE/'ui_assets'/'control-room-background.png') as image:
-            self.bg_source=image.copy()
+            self.bg_source=image.convert('RGB')
         with Image.open(HERE/'assets'/'feibi-tray.ico') as image:
             self.avatar_source=image.copy()
         self.resize_images()
@@ -102,6 +102,8 @@ class ControlRoom:
         self.drag = None
         self.resizing = None
         self.resize_after = None
+        self.pending_bounds = None
+        self.last_resize_frame = 0
         state=read('bridge-status.json')
         self.bridge_pid=state.get('pid') if state.get('running') else None
         self.feedback = '保存后约 1 秒生效，冲突时保留当前按键。'
@@ -125,8 +127,17 @@ class ControlRoom:
         return self.c.create_polygon(points,smooth=True,splinesteps=24,fill=fill,outline=outline,width=width)
 
     def text(self,x,y,value,size=20,color=None,bold=False,anchor='nw',width=None,latin=False):
-        return self.c.create_text(x,y,text=value,font=('Segoe UI' if latin else self.family,-round(size*self.scale),'bold' if bold else 'normal'),
+        family='Segoe UI' if latin else self.family
+        weight='bold' if bold else 'normal'
+        item=self.c.create_text(x,y,text=value,font=(family,-round(size*self.scale),weight),
                                   fill=color or C['ink'],anchor=anchor,width=round(width*self.scale) if width else None)
+        self.text_items[item]=(family,size,weight,width)
+        return item
+
+    def embed(self,x,y,widget,width,height,font):
+        item=self.c.create_window(x,y,window=widget,width=round(width*self.scale),height=round(height*self.scale),anchor='nw')
+        self.window_items[item]=(widget,width,height,font)
+        self.children.append(widget)
 
     def button(self,x,y,w,h,label,callback,primary=False,small=False):
         fill,fg = (C['accent'],'#FFFFFF') if primary else ('#FAF7FF',C['accent'])
@@ -156,19 +167,24 @@ class ControlRoom:
     def drag_move(self,event):
         if self.resizing:
             edge,x,y,bounds=self.resizing
-            left,top,width,height=resized_bounds(bounds,edge,event.x_root-x,event.y_root-y,self.minimum_width)
-            self.root.geometry(f'{width}x{height}{left:+d}{top:+d}')
+            self.pending_bounds=resized_bounds(bounds,edge,event.x_root-x,event.y_root-y,self.minimum_width)
+            if not self.resize_after:
+                delay=max(0,round(16-(time.perf_counter()-self.last_resize_frame)*1000))
+                self.resize_after=self.root.after(delay,self.apply_pending_resize)
         elif self.drag:
             self.root.geometry(f'+{event.x_root-self.drag[0]}+{event.y_root-self.drag[1]}')
 
     def drag_end(self,event=None):
         resizing=self.resizing is not None
-        self.resizing=None
         self.drag=None
         if resizing:
+            self.apply_pending_resize()
+            self.resizing=None
             self.c.grab_release()
             self.root.update_idletasks()
             self.redraw_size()
+            self.resize_images()
+            self.update_image_items()
             DATA.mkdir(parents=True,exist_ok=True)
             target=DATA/'control-room-window.json'
             temporary=target.with_suffix('.'+uuid.uuid4().hex+'.tmp')
@@ -186,44 +202,67 @@ class ControlRoom:
             cursor='hand2' if items and self.c.tag_bind(items[-1],'<Button-1>') else ''
         self.c.configure(cursor=cursor)
 
-    def resize_images(self):
-        self.bg=ImageTk.PhotoImage(self.bg_source.resize((self.pixel_w,self.pixel_h),Image.Resampling.LANCZOS))
+    def resize_images(self,fast=False):
+        # Interactive frames use a cheap sample; the release frame uses Lanczos.
+        # Text and native controls stay sharp because they are laid out in place.
+        sample=Image.Resampling.NEAREST if fast else Image.Resampling.LANCZOS
+        self.bg=ImageTk.PhotoImage(self.bg_source.resize((self.pixel_w,self.pixel_h),sample))
         side=max(1,round(56*self.scale))
-        self.avatar=ImageTk.PhotoImage(self.avatar_source.resize((side,side),Image.Resampling.LANCZOS))
+        self.avatar=ImageTk.PhotoImage(self.avatar_source.resize((side,side),sample))
+
+    def update_image_items(self):
+        self.c.itemconfigure(self.bg_item,image=self.bg)
+        self.c.itemconfigure(self.avatar_item,image=self.avatar)
+
+    def apply_pending_resize(self):
+        if self.resize_after:
+            self.root.after_cancel(self.resize_after)
+            self.resize_after=None
+        bounds,self.pending_bounds=self.pending_bounds,None
+        if bounds is None or self.closed:
+            return
+        self.last_resize_frame=time.perf_counter()
+        left,top,width,height=bounds
+        # Prepare content first, then publish its matching window bounds in the
+        # same Tk turn. There is never a deliberately delayed content frame.
+        self.resize_content(width,height,fast=True)
+        self.root.geometry(f'{width}x{height}{left:+d}{top:+d}')
 
     def configure_size(self,event):
         if event.widget is not self.root or (event.width,event.height)==(self.pixel_w,self.pixel_h):
             return
-        # Coalesce Windows resize messages so artwork decoding never runs on
-        # every pointer sample. Source images stay in memory until GUI exit.
-        if self.resize_after:
+        if self.resizing:
             return
-        self.resize_after=self.root.after(45,self.redraw_size)
+        self.redraw_size()
 
     def redraw_size(self):
-        if self.resize_after:
-            self.root.after_cancel(self.resize_after)
-            self.resize_after=None
         width,height=self.root.winfo_width(),self.root.winfo_height()
         if self.closed or width<2 or height<2 or (width,height)==(self.pixel_w,self.pixel_h):
             return
-        focused=self.root.focus_get()
-        edit=focused is getattr(self,'entry',None) and self.tab==0
-        if self.tab==0 and hasattr(self,'entry') and self.entry.winfo_exists():
-            self.entry_value=self.entry.get()
-            insert=self.entry.index('insert')
-            selected=(self.entry.index('sel.first'),self.entry.index('sel.last')) if self.entry.selection_present() else None
-        scroll=self.children[0].yview()[0] if self.detail and self.children else None
+        self.resize_content(width,height)
+
+    def resize_content(self,width,height,fast=False):
+        if (width,height)==(self.pixel_w,self.pixel_h):
+            return
+        scale=min(width/W,height/H)
+        previous_scale=self.scale
+        self.c.scale('all',0,0,scale/previous_scale,scale/previous_scale)
         self.pixel_w,self.pixel_h=width,height
-        self.scale=min(width/W,height/H)
-        self.resize_images()
-        self.draw()
-        if edit:
-            self.entry.focus_set()
-            self.entry.icursor(insert)
-            if selected:self.entry.selection_range(*selected)
-        if scroll is not None and self.children:
-            self.children[0].yview_moveto(scroll)
+        self.scale=scale
+        self.resize_images(fast=fast)
+        self.update_image_items()
+        for item,(family,size,weight,wrap) in self.text_items.items():
+            options={}
+            if round(size*scale)!=round(size*previous_scale):
+                options['font']=(family,-max(1,round(size*scale)),weight)
+            if wrap and round(wrap*scale)!=round(wrap*previous_scale):
+                options['width']=round(wrap*scale)
+            if options:self.c.itemconfigure(item,**options)
+        for item,(widget,w,h,font) in self.window_items.items():
+            self.c.itemconfigure(item,width=round(w*scale),height=round(h*scale))
+            family,size,weight=font
+            if round(size*scale)!=round(size*previous_scale):
+                widget.configure(font=(family,-max(1,round(size*scale)),weight))
 
     def change_tab(self,index):
         if self.tab==0 and hasattr(self,'entry') and self.entry.winfo_exists():
@@ -237,9 +276,11 @@ class ControlRoom:
             widget.destroy()
         self.children=[]
         self.c.delete('all')
-        self.c.create_image(0,0,image=self.bg,anchor='nw')
+        self.text_items={}
+        self.window_items={}
+        self.bg_item=self.c.create_image(0,0,image=self.bg,anchor='nw')
         self.round(18,18,180,H-36,26,'#FFFCF7','#E9E2EF')
-        self.c.create_image(48,43,image=self.avatar,anchor='nw')
+        self.avatar_item=self.c.create_image(48,43,image=self.avatar,anchor='nw')
         self.text(40,116,'菲比的小小',23,bold=True)
         self.text(40,145,'控制室',30,C['accent'],bold=True)
         self.text(41,188,'FEIBI COMPANION',11,C['muted'],latin=True)
@@ -324,8 +365,7 @@ class ControlRoom:
         self.entry=tk.Entry(self.root,font=('Segoe UI',-round(26*self.scale),'bold'),fg='#6F5C9F',bg='#F7F2FF',insertbackground=C['accent'],
                             borderwidth=0,highlightthickness=0,relief='flat')
         self.entry.insert(0,self.entry_value)
-        self.c.create_window(274,316,window=self.entry,width=round(335*self.scale),height=round(38*self.scale),anchor='nw')
-        self.children.append(self.entry)
+        self.embed(274,316,self.entry,335,38,('Segoe UI',26,'bold'))
         self.text(255,389,'常用小暗号',15,C['muted'])
         self.button(255,418,98,38,'F8 默认',lambda:self.choose('F8'),small=True)
         self.button(365,418,157,38,'Ctrl + Alt + H',lambda:self.choose('Ctrl+Alt+H'),small=True)
@@ -373,8 +413,11 @@ class ControlRoom:
         self.text(241,628,'诊断只保存在本机，不会自动上传',14,C['muted'])
 
     def notice(self,text):
+        previous=set(self.c.find_all())
         self.round(235,610,422,33,12,'#EEE5F9')
         self.text(446,627,text,16,C['accent'],anchor='center')
+        for item in set(self.c.find_all())-previous:
+            self.c.scale(item,0,0,self.scale,self.scale)
 
     def async_call(self,command,done):
         if self.busy:
@@ -416,8 +459,7 @@ class ControlRoom:
         box=ScrolledText(self.root,wrap='word',font=('Microsoft YaHei UI',-round(14*self.scale)),
                          bg='#FFFEFC',fg=C['ink'],relief='flat',highlightthickness=0)
         box.insert('1.0',self.report);box.configure(state='disabled')
-        self.c.create_window(250,222,window=box,width=round(390*self.scale),height=round(344*self.scale),anchor='nw')
-        self.children.append(box)
+        self.embed(250,222,box,390,344,('Microsoft YaHei UI',14,'normal'))
         self.button(232,606,130,40,'返回',self.close_detail,small=True)
         self.button(374,606,130,40,'刷新报告',self.draw,small=True)
         self.button(516,606,142,40,'复制诊断',self.copy_report,primary=True,small=True)
@@ -513,7 +555,7 @@ class ControlRoom:
                 self.detail=False
                 self.draw()
             self.show()
-        if self.root.state()!='withdrawn' and self.tab!=0 and not self.detail and not self.busy:
+        if self.root.state()!='withdrawn' and self.tab!=0 and not self.detail and not self.busy and not self.resizing:
             state=read('bridge-status.json');updater=read('update-status.json')
             snapshot=tuple(state.get(k) for k in ('phase','form','hotkey','version','error'))+tuple(updater.get(k) for k in ('phase','installed_version','latest_version','error'))
             if snapshot!=self.last_snapshot:
