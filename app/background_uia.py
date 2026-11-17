@@ -113,17 +113,33 @@ def click_background(control, window):
         wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
     u.SendMessageTimeoutW.restype = wintypes.LPARAM
     result = ctypes.c_size_t()
-    for message, flags in ((0x0200, 0), (0x0201, 1), (0x0202, 0)):
-        if not u.SendMessageTimeoutW(candidates[0], message, flags, position, 2, 1000, ctypes.byref(result)):
-            raise RuntimeError("后台控件没有响应指针消息。")
+    try:
+        for message, flags in ((0x0200, 0), (0x0201, 1), (0x0202, 0)):
+            if not u.SendMessageTimeoutW(candidates[0], message, flags, position, 2, 1000, ctypes.byref(result)):
+                raise RuntimeError("后台控件没有响应指针消息。")
+    except Exception:
+        # Never leave a provider with a synthetic button-down/capture after a
+        # timeout. These messages target only this operation's renderer.
+        u.PostMessageW(candidates[0], 0x0202, 0, position)
+        u.PostMessageW(candidates[0], 0x001f, 0, 0)
+        raise
 
 
-def invisible(window):
+def parked_position(window, user):
+    return user.GetSystemMetrics(76)-max(1,window.rect[2]-window.rect[0])-128, user.GetSystemMetrics(77)
+
+
+def invisible(window, alpha=0):
     windows, setter = api()
     style = windows.get_long(window.hwnd, -20)
     # Keep WS_VISIBLE for Chromium accessibility, while preventing painting/focus/taskbar.
-    setter(window.hwnd, -20, (style | 0x00080000 | 0x08000000 | 0x80) & ~0x40000)
-    if not windows.user32.SetLayeredWindowAttributes(window.hwnd, 0, 0, 2):
+    setter(window.hwnd, -20, (style | 0x00080000 | 0x08000000 | 0x80 | 0x20) & ~0x40000)
+    if not windows.user32.SetLayeredWindowAttributes(window.hwnd, 0, alpha, 2):
+        raise ctypes.WinError(ctypes.get_last_error())
+    user=windows.user32
+    user.SetWindowPos.argtypes=[wintypes.HWND,wintypes.HWND,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.UINT]
+    x,y=parked_position(window,user)
+    if not user.SetWindowPos(window.hwnd,wintypes.HWND(1),x,y,0,0,0x0001 | 0x0010 | 0x0040):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
@@ -172,6 +188,7 @@ def prepare(rebuild=True):
             ready = False
         if ready:
             windows, _ = api()
+            invisible(existing)
             windows.user32.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
             windows.user32.EnableWindow(existing.hwnd, False)
             return {"prepared": True, "hwnd": existing.hwnd, "reused": True}
@@ -287,18 +304,18 @@ def finish_prepare(helper):
     windows, _ = api()
     user = windows.user32
     user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    # Park before enabling or changing alpha: even a killed setup worker must
+    # never leave a near-transparent, enabled window over the user's desktop.
+    invisible(helper,alpha=1)
     user.EnableWindow(helper.hwnd, True)
     # Alpha-zero Chromium pages can stop publishing/updating their accessibility
     # tree on other GPUs. Allow initialization at alpha 1, without activation.
     user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-    user.SetLayeredWindowAttributes(helper.hwnd, 0, 1, 2)
-    user.SetWindowPos(helper.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0013 | 0x0040)
     try:
         return _finish_prepare(helper)
     finally:
         invisible(helper)
-        user.SetWindowPos(helper.hwnd, wintypes.HWND(-2), 0, 0, 0, 0, 0x0013)
         user.EnableWindow(helper.hwnd, False)
 
 
@@ -434,6 +451,12 @@ class BackgroundSelection:
 
 def release_helper_focus():
     windows, _ = api()
+    # Reassert parking for an existing helper if Chromium changes its geometry
+    # or topmost state. Never apply this policy to an unmarked client window.
+    helper=owned_window()
+    if helper and (helper.rect[2]>=windows.user32.GetSystemMetrics(76)
+                   or helper.exstyle&0x8 or not helper.exstyle&0x20):
+        invisible(helper)
     current = windows.user32.GetForegroundWindow()
     if windows.user32.GetPropW(current, MARKER) != MARKER_VALUE:
         return

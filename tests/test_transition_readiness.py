@@ -92,8 +92,34 @@ class TransitionReadinessTests(unittest.TestCase):
              patch.object(background, 'invisible') as invisible:
             with self.assertRaises(RuntimeError):
                 background.finish_prepare(SimpleNamespace(hwnd=11))
-            invisible.assert_called_once()
+            self.assertEqual(invisible.call_count,2)
+            self.assertEqual(invisible.call_args_list[0].kwargs,{'alpha':1})
             self.assertEqual(windows.user32.EnableWindow.call_args.args, (11, False))
+
+    def test_helper_is_outside_all_monitors_and_never_topmost(self):
+        windows=Mock();user=windows.user32
+        user.GetSystemMetrics.side_effect=lambda index:{76:-1920,77:-300}[index]
+        windows.get_long.return_value=0x40000
+        setter=Mock();helper=SimpleNamespace(hwnd=11,rect=(0,0,1400,900))
+        with patch.object(background,'api',return_value=(windows,setter)):
+            background.invisible(helper,alpha=1)
+        style=setter.call_args.args[2]
+        self.assertTrue(style&0x20);self.assertTrue(style&0x08000000)
+        self.assertFalse(style&0x40000)
+        args=user.SetWindowPos.call_args.args
+        self.assertEqual(args[1].value,1) # HWND_BOTTOM, never HWND_TOPMOST
+        self.assertLess(args[2]+1400,-1920)
+
+    def test_parking_happens_before_helper_can_receive_input(self):
+        windows=Mock();events=[]
+        windows.user32.EnableWindow.side_effect=lambda hwnd,enabled:events.append(('enabled',enabled))
+        with patch.object(background,'api',return_value=(windows,Mock())), \
+             patch.object(background,'invisible',side_effect=lambda *a,**k:events.append(('park',k.get('alpha',0)))), \
+             patch.object(background,'_finish_prepare',return_value={'prepared':True}):
+            background.finish_prepare(SimpleNamespace(hwnd=11))
+        self.assertEqual(events[0],('park',1))
+        self.assertEqual(events[1],('enabled',True))
+        self.assertEqual(events[-1],('enabled',False))
 
     def test_semantic_navigation_rejects_duplicate_entries(self):
         def scan(hwnd, collect, include):

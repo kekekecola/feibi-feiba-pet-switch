@@ -158,7 +158,8 @@ class ControlRoom:
             self.resizing=(edge,event.x_root,event.y_root,
                            (self.root.winfo_x(),self.root.winfo_y(),self.pixel_w,self.pixel_h))
             self.drag=None
-            self.c.grab_set()
+            # Tk already captures the normal button drag; an explicit grab can
+            # outlive a lost mouse-up and trap input inside this window.
         elif event.y<72*self.scale:
             self.drag=(event.x_root-self.root.winfo_x(),event.y_root-self.root.winfo_y())
         else:
@@ -529,6 +530,8 @@ class ControlRoom:
 
     def tick(self):
         try:
+            if self.resizing and not ctypes.WinDLL('user32').GetAsyncKeyState(1)&0x8000:
+                self.drag_end()
             self.tick_once()
             self.heartbeat()
         except Exception:
