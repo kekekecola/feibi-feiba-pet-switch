@@ -19,6 +19,7 @@ from paths import RUNTIME
 STATE = RUNTIME / "background-settings.json"
 MARKER = "FeibiNativeBackgroundSettings"
 MARKER_VALUE = 0x46484942
+_next_recovery_scan = 0
 
 
 def api():
@@ -51,8 +52,19 @@ def invoke_background(control):
 
 
 def owned_window():
+    global _next_recovery_scan
     windows, _ = api()
-    state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+    try:
+        state=json.loads(STATE.read_text(encoding='utf-8'))
+        if not isinstance(state,dict):state={}
+    except (OSError,ValueError):
+        state={}
+    existing=window_from_state(windows,state)
+    if existing:
+        return existing
+    if time.monotonic()<_next_recovery_scan:
+        return None
+    _next_recovery_scan=time.monotonic()+3
     all_windows = windows.enumerate()
     for window in all_windows:
         if (window.hwnd == state.get("hwnd") and window.pid == state.get("pid")
@@ -70,6 +82,23 @@ def owned_window():
         invisible(helper)
         return helper
     return None
+
+
+def window_from_state(windows,state):
+    hwnd,pid=state.get('hwnd'),state.get('pid')
+    user=windows.user32
+    if type(hwnd) is not int or type(pid) is not int or not user.IsWindow(hwnd):
+        return None
+    actual=wintypes.DWORD()
+    user.GetWindowThreadProcessId(hwnd,ctypes.byref(actual))
+    if actual.value!=pid or user.GetPropW(hwnd,MARKER)!=MARKER_VALUE:
+        return None
+    rect=wintypes.RECT()
+    if not user.GetWindowRect(hwnd,ctypes.byref(rect)):
+        return None
+    return native.NativeWindow(hwnd,pid,'ChatGPT','Chrome_WidgetWin_1',bool(user.IsWindowVisible(hwnd)),
+        windows.get_long(hwnd,-16),windows.get_long(hwnd,-20),
+        (rect.left,rect.top,rect.right,rect.bottom),int(user.GetDpiForWindow(hwnd) or 96))
 
 
 def save_state(window, main_hwnd):
@@ -176,7 +205,35 @@ def restore_setup_focus(target, helper, original_main=None):
         time.sleep(0.06)
 
 
+def compact_helper(window):
+    width,height=window.rect[2]-window.rect[0],window.rect[3]-window.rect[1]
+    target_w,target_h=min(width,round(900*window.dpi/96)),min(height,round(640*window.dpi/96))
+    if (width,height)==(target_w,target_h):
+        return False
+    windows,_=api();user=windows.user32
+    user.SetWindowPos.argtypes=[wintypes.HWND,wintypes.HWND,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.UINT]
+    def size(w,h):
+        user.SetWindowPos(window.hwnd,wintypes.HWND(1),user.GetSystemMetrics(76)-w-128,
+            user.GetSystemMetrics(77),w,h,0x0010 | 0x0040)
+    size(target_w,target_h)
+    try:
+        msaa_controls.pet_actions(window.hwnd,native.PET_NAMES)
+    except Exception:
+        size(width,height)
+        logging.info('Compact helper layout unavailable; restored its prior size')
+        return False
+    return True
+
+
 def prepare(rebuild=True):
+    result=_prepare(rebuild)
+    helper=owned_window()
+    if helper:
+        result['helper_compacted']=compact_helper(helper)
+    return result
+
+
+def _prepare(rebuild=True):
     existing = owned_window()
     if existing:
         try:

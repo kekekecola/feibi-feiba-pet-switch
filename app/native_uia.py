@@ -27,8 +27,15 @@ def preferences() -> dict:
     return tomllib.loads((directory / "config.toml").read_text(encoding="utf-8")).get("desktop", {})
 
 
-def selected_form() -> str | None:
+def selected_form(refresh=True) -> str | None:
     selected = preferences().get("selected-avatar-id")
+    if not refresh:
+        known=pet_registry.load()
+        PET_IDS.update({form:role['id'] for form,role in known.items()})
+        PET_NAMES.update({form:role['name'] for form,role in known.items()})
+        form=next((key for key,role in known.items() if role['id']==selected),None)
+        if form is not None:
+            return form
     roles = pet_registry.refresh(selected)
     PET_IDS.update({form: role['id'] for form, role in roles.items()})
     PET_NAMES.update({form: role['name'] for form, role in roles.items()})

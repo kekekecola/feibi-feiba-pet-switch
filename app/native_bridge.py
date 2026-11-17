@@ -322,7 +322,7 @@ class Bridge:
         self.room_processes = []
         self.room_open_nonce = None
         self.next_reconnect = 0
-        self.next_probe = 0
+        self.next_health_check = 0
         self.next_maintenance = 0
         self.state = {"running": True, "pid": os.getpid(), "phase": "idle",
                       "native_bridge_configured": True, "native_switch_confirmed": False,
@@ -453,7 +453,7 @@ class Bridge:
             self.progress_path = None
             self.update(phase="idle", connection_state="ready", target_form=None, error=None, control_details=None, **result)
             self.reconnect_failures = 0
-            self.next_probe = time.monotonic() + 20
+            self.next_health_check = time.monotonic() + 3
             self.ack(command_id, "completed", "原生智能伙伴已切换。")
             logging.info("Native transition completed: %s", result)
         except Exception as error:
@@ -493,6 +493,10 @@ class Bridge:
     def reconnect_if_needed(self):
         if self.closing or self.busy or time.monotonic() < self.next_reconnect:
             return
+        if (self.state.get('connection_state')=='ready' and not recovery_journal.JOURNAL.exists()
+                and time.monotonic()<self.next_health_check):
+            return
+        self.next_health_check=time.monotonic()+3
         try:
             if recovery_journal.JOURNAL.exists():
                 hide_cg()
@@ -500,8 +504,7 @@ class Bridge:
                     self.update(phase='recovering_native')
                     return
             if (self.state.get("connection_state") == "ready"
-                    and background.owned_window() and control.status().get("running")
-                    and time.monotonic() < self.next_probe):
+                    and background.owned_window() and control.status().get("running")):
                 return
             self.update(connection_state="disconnected", native_switch_confirmed=False)
             # Keep F8 alive while GPT is closed; initialize only after a primary window exists.
@@ -594,7 +597,7 @@ class Bridge:
                     recover_native_visibility()
                     background.release_helper_focus()
                     prefs = native.preferences()
-                    self.update(form=native.selected_form(), selected_id=prefs.get("selected-avatar-id"),
+                    self.update(form=native.selected_form(refresh=False), selected_id=prefs.get("selected-avatar-id"),
                                 native_pet_size_px=prefs.get("avatar-overlay-mascot-width-px", 112))
                     self.reconnect_if_needed()
                 else:
