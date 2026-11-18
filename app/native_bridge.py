@@ -29,7 +29,8 @@ import cg_ipc
 APP_DIR = Path(__file__).resolve().parent
 from paths import RUNTIME, VERSION
 STATUS = RUNTIME / "bridge-status.json"
-ACTIONS = {"toggle", "take-off", "put-on", "quit"}
+SHUTDOWN_ACTIONS = {"quit", "quit-for-update"}
+ACTIONS = {"toggle", "take-off", "put-on"} | SHUTDOWN_ACTIONS
 PENDING_RESTORE = []
 
 
@@ -423,8 +424,13 @@ class Bridge:
                 process.wait(timeout=3)
 
     def request(self, action, command_id=None):
-        if action == "quit":
+        if action in SHUTDOWN_ACTIONS:
             source = 'control_quit' if command_id else 'tray_exit'
+            managed_home = os.environ.get('FEIBI_SWITCH_HOME')
+            self.keep_helper_on_exit = bool(action == 'quit-for-update' and managed_home
+                                            and (Path(managed_home) / 'pending-update.json').is_file())
+            if self.keep_helper_on_exit:
+                source = 'program_update'
             logging.info('Shutdown requested: source=%s command_id=%s', source, command_id)
             self.update(shutdown_source=source)
             self.closing = True
@@ -583,7 +589,7 @@ class Bridge:
                 continue
             if valid_command(command, path.stem, ACTIONS):
                 self.request_meta[path.stem] = command
-                if command['action'] == 'quit' and not claim(RUNTIME / 'bridge-decisions', command):
+                if command['action'] in SHUTDOWN_ACTIONS and not claim(RUNTIME / 'bridge-decisions', command):
                     self.ack(path.stem, 'cancelled', '退出请求已取消或过期。')
                 else:
                     self.request(command["action"], path.stem)
@@ -634,7 +640,8 @@ class Bridge:
 
     def close(self):
         try:
-            for cleanup in (self.close_room, self.tray.close, self.hotkey.close, self.pool.close, hide_cg, recover_native_visibility, background.close):
+            finish_helper = background.release_helper_focus if getattr(self, 'keep_helper_on_exit', False) else background.close
+            for cleanup in (self.close_room, self.tray.close, self.hotkey.close, self.pool.close, hide_cg, recover_native_visibility, finish_helper):
                 try:
                     cleanup()
                 except Exception:

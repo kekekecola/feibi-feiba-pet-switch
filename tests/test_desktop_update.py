@@ -208,6 +208,21 @@ class DesktopUpdateTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 2)
             self.assertEqual(manager.pointer(home), current)
 
+    def test_update_preserves_existing_helper_when_old_bridge_supports_handoff(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            current = initial_pointer(home)
+            current['version'] = '1.6.9'
+            manager.atomic(home / 'current.json', current)
+            source = home / 'versions' / 'new'
+            source.mkdir()
+            (source / 'VERSION').write_text('1.7.0', encoding='utf-8')
+            with patch.object(manager, 'run') as run, patch.object(manager, 'healthy'), \
+                 patch('install_transaction.task_snapshot', return_value={'running':False}):
+                result = manager.activate(home, source, home / current['python'], current)
+            self.assertEqual(result['version'], '1.7.0')
+            self.assertIn('quit-for-update', run.call_args_list[0].args[0])
+
     def test_update_mutex_excludes_second_updater(self):
         with tempfile.TemporaryDirectory() as folder:
             with manager.UpdateLock(Path(folder)):

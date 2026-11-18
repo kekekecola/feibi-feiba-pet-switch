@@ -18,6 +18,18 @@ from request_lifecycle import claim
 
 
 class TransitionReadinessTests(unittest.TestCase):
+    def test_helper_start_uses_expansion_without_toggling_open_menu(self):
+        trigger = Mock()
+        pattern = trigger.GetPattern.return_value
+        with patch.object(background.native, 'exists', return_value=True), \
+             patch.object(background.native, 'automation'), patch.object(background, 'click_background') as click:
+            pattern.ExpandCollapseState = 0
+            self.assertTrue(background.open_file_menu(trigger, Mock(), Mock(), Mock()))
+            pattern.ExpandCollapseState = 1
+            self.assertTrue(background.open_file_menu(trigger, Mock(), Mock(), Mock()))
+        pattern.Expand.assert_called_once_with(waitTime=0)
+        click.assert_not_called()
+
     def test_unrelated_or_withdrawn_cg_cannot_authorize_selection(self):
         ticket = cg_ipc.Ticket.__new__(cg_ipc.Ticket)
         ticket.command_id = 'a' * 32

@@ -51,6 +51,28 @@ def invoke_background(control):
     raise RuntimeError("后台控件不支持直接调用，已取消；不会移动鼠标或激活前台。")
 
 
+def open_file_menu(file_menu, menu, main, windows):
+    """Expand Chromium's titlebar menu without toggling an already-open popup."""
+    try:
+        pattern = file_menu.GetPattern(native.automation().PatternId.ExpandCollapsePattern)
+        if pattern:
+            if pattern.ExpandCollapseState != 1:
+                pattern.Expand(waitTime=0)
+            return native.exists(menu, 2)
+    except Exception:
+        logging.debug('File menu ExpandCollapse unavailable', exc_info=True)
+    try:
+        invoke_background(file_menu)
+    except Exception:
+        logging.debug('File menu direct action unavailable', exc_info=True)
+    if native.exists(menu, 1):
+        return True
+    if windows.user32.IsIconic(main.hwnd):
+        return False
+    click_background(file_menu, main)
+    return native.exists(menu, 2)
+
+
 def owned_window():
     global _next_recovery_scan
     windows, _ = api()
@@ -245,18 +267,9 @@ def prepare(rebuild=True):
         file_menu = root.MenuItemControl(searchDepth=24, AutomationId="application-menu-trigger-file-menu")
         if not native.exists(file_menu, 1):
             raise RuntimeError("找不到 GPT 新窗口菜单入口。")
-        try:
-            invoke_background(file_menu)
-        except Exception:
-            # Provisioning only: Chromium sometimes advertises a disabled
-            # legacy menu pattern while its custom titlebar accepts messages.
-            logging.warning('File menu pattern unavailable; using directed setup message')
-            click_background(file_menu, main)
-        if not native.exists(menu, 1):
-            # Only startup preparation may use the foreground native menu.
-            # Ordinary F8 operations never enter this provisioning path.
-            click_background(file_menu, main)
-        if not native.exists(menu, 2):
+        if not open_file_menu(file_menu, menu, main, windows):
+            if windows.user32.IsIconic(main.hwnd):
+                raise RuntimeError("Codex 主窗口已最小化。打开窗口后会自动重新连接。")
             raise RuntimeError("找不到 GPT 新建窗口菜单。")
     found = []
     stop = threading.Event()

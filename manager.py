@@ -189,12 +189,13 @@ def register(task, xml):
         run(['schtasks', '/Create', '/TN', task, '/XML', file, '/F'], capture_output=True)
 
 
-def stop(home):
+def stop(home, keep_helper=False):
     current = pointer(home)
     python = home / current['python']
     source = home / current['release']
     try:
-        run([python, source / 'app' / 'bridge_control.py', 'quit', '--timeout', '40'], env=environment(home),
+        action = 'quit-for-update' if keep_helper and version(current['version']) >= (1, 6, 9) else 'quit'
+        run([python, source / 'app' / 'bridge_control.py', action, '--timeout', '40'], env=environment(home),
             capture_output=True, timeout=45)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -252,7 +253,7 @@ def activate(home, source, python, previous):
                python=str(python.relative_to(home)))
     atomic(home / 'pending-update.json', dict(previous=previous, new=new))
     if previous:
-        stop(home)
+        stop(home, keep_helper=True)
     atomic(home / 'current.json', new)
     try:
         run(['schtasks', '/Run', '/TN', TASK], capture_output=True)
@@ -275,6 +276,32 @@ def activate(home, source, python, previous):
 def update(home):
     with UpdateLock(home):
         return update_locked(home)
+
+
+def update_from_folder(home, source):
+    """Stage a downloaded release without touching the client's pet library."""
+    verify_source(source)
+    incoming = (source / 'VERSION').read_text(encoding='utf-8').strip()
+    with UpdateLock(home):
+        recover_pending(home)
+        current = pointer(home)
+        if version(incoming) <= version(current['version']):
+            return current
+        target = home / 'versions' / ('v' + incoming + '-' + uuid.uuid4().hex[:8])
+        if target.resolve().is_relative_to(source.resolve()):
+            raise ValueError('Release source cannot contain the managed versions directory')
+        shutil.copytree(source, target, ignore=shutil.ignore_patterns(
+            '.git', '.venv', 'runtime', '__pycache__', 'dist', 'managed-link.json'))
+        verify_source(target)
+        status(home, phase='preparing', latest_version=incoming, error=None)
+        try:
+            python = prepare_python(home, target, current)
+            result = activate(home, target, python, current)
+        except Exception as error:
+            status(home, phase='error', error=str(error))
+            raise
+        status(home, phase='current', installed_version=result['version'], error=None)
+        return result
 
 
 def update_locked(home):

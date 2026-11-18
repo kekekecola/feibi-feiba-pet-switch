@@ -79,7 +79,8 @@ class ReliabilityTests(unittest.TestCase):
                      patch.object(install_transaction, 'restore_task') as restore:
                     with self.assertRaisesRegex(RuntimeError, 'rolled back'):
                         installer.apply_install(SimpleNamespace(skip_pets=False, no_start=False), home,
-                                                root / 'python.exe', '<new-task/>')
+                                                root / 'python.exe', '<new-task/>',
+                                                inspection={'reuse':{},'conflicts':[]})
                     restore.assert_called_once_with(snapshot)
                 for path, expected in before.items():
                     self.assertEqual(path.read_bytes(), expected)

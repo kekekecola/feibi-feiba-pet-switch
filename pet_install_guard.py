@@ -33,6 +33,18 @@ def inspect(home):
             result['reuse'][form] = next(iter(mapped))
         elif len(mapped)>1:
             result['conflicts'].append(name+'存在不同账号的迁移ID，已阻止自动新增。')
+        canonical = home / 'pets' / identifier
+        if form not in result['reuse'] and canonical.exists():
+            try:
+                pet = json.loads((canonical / 'pet.json').read_text(encoding='utf-8'))
+                image = pet.get('spritesheetPath')
+                if (not canonical.is_symlink() and pet.get('id') == identifier
+                        and image in ('spritesheet.png', 'spritesheet.webp') and (canonical / image).is_file()):
+                    result['reuse'][form] = 'custom:' + identifier
+                else:
+                    raise ValueError('invalid installed pet')
+            except (OSError, ValueError, AttributeError):
+                result['conflicts'].append(name+'已有本地目录，无法确认其图集。现有文件会保留。')
         local = []
         for metadata in (home / 'pets').glob('*/pet.json'):
             if metadata.parent.is_symlink() or not metadata.resolve().is_relative_to((home/'pets').resolve()):
