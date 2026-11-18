@@ -58,7 +58,10 @@ def open_file_menu(file_menu, menu, main, windows):
         if pattern:
             if pattern.ExpandCollapseState != 1:
                 pattern.Expand(waitTime=0)
-            return native.exists(menu, 2)
+            if native.exists(menu, 2):
+                return True
+            if pattern.ExpandCollapseState == 1:
+                return False
     except Exception:
         logging.debug('File menu ExpandCollapse unavailable', exc_info=True)
     try:
@@ -259,6 +262,8 @@ def prepare(rebuild=True):
             return prepare(rebuild=False)
     windows, _ = api()
     main = windows.main()
+    if windows.user32.IsIconic(main.hwnd):
+        raise RuntimeError("Codex 主窗口已最小化。打开窗口后会自动重新连接。")
     foreground = windows.user32.GetForegroundWindow()
     original = {w.hwnd for w in windows.enumerate()}
     root = native.automation().ControlFromHandle(main.hwnd)
@@ -285,13 +290,24 @@ def prepare(rebuild=True):
                     invisible(window)
                     if not found:
                         found.append(window)
+                    stop.set()
                     return
             stop.wait(0.025)
 
     watcher = threading.Thread(target=catch_new_window, daemon=True)
     watcher.start()
     try:
-        invoke_background(menu)
+        try:
+            invoke_background(menu)
+        except Exception:
+            if not native.exists(menu, 0) or windows.user32.IsIconic(main.hwnd):
+                raise
+            click_background(menu, main)
+        else:
+            # Some Chromium providers acknowledge the menu action without
+            # dismissing the popup. Retry only when the same item stays open.
+            if not stop.wait(1.5) and not found and native.exists(menu, 0) and not windows.user32.IsIconic(main.hwnd):
+                click_background(menu, main)
         deadline = time.monotonic() + 10
         while not found and time.monotonic() < deadline:
             time.sleep(0.05)

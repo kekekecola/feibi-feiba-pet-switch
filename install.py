@@ -257,13 +257,13 @@ def main():
     if mode == 'managed':
         from manager import update_from_folder
         result = update_from_folder(previous_root, ROOT)
-        print('切换程序版本 ' + result['version'] + '。继续使用现有宠物。')
+        print('Switcher version ' + result['version'] + '. Your existing pets are preserved.')
         return
     if mode == 'legacy' and (previous_root / 'VERSION').is_file():
         from manager import version
         previous_version = (previous_root / 'VERSION').read_text(encoding='utf-8').strip()
         if version((ROOT / 'VERSION').read_text(encoding='utf-8').strip()) <= version(previous_version):
-            print('切换程序已安装 ' + previous_version + '。继续使用现有宠物。')
+            print('Switcher version ' + previous_version + ' is already installed. Your existing pets are preserved.')
             return
     import tkinter  # Fail early if Python was installed without Tcl/Tk.
     if not python.exists():
@@ -275,9 +275,9 @@ def main():
     xml = task_xml(python.with_name('pythonw.exe'), sid)
     apply_install(args, home, python, xml, snapshot=snapshot, previous_root=previous_root, inspection=inspection)
     if args.skip_pets:
-        print('程序安装完成。继续使用宠物库里的原有宠物，按 F8 切换。')
+        print('Program installed. Keep using your existing pets and press F8 to switch.')
     else:
-        print('首次安装完成。在客户端刷新宠物库，选择其中一只宠物后按 F8。')
+        print('First-time installation complete. Refresh Pets in Codex and select either pet to use F8.')
     print('Keep this folder in place. The task starts only the F8 helper, never the desktop client.')
 
 
