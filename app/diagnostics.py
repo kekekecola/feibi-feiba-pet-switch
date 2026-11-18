@@ -20,6 +20,8 @@ def collect():
                   process_alive=control.process_alive(state.get('pid')),
                   recovery_pending=(RUNTIME / 'native-recovery.json').exists(),
                   updater=control.read_json(RUNTIME / 'update-status.json'))
+    report['status']['last_switch_failure'] = state.get('last_switch_failure')
+    report['status']['native_overlay_form'] = state.get('native_overlay_form')
     # Updater status is intentionally small; never include a raw config.toml or global state.
     report['updater'] = {key:report['updater'].get(key) for key in
                          ('phase', 'installed_version', 'latest_version', 'last_checked', 'error')}

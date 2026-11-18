@@ -27,7 +27,7 @@ class Ticket:
         state = control.status()
         return (state.get('running') is True and state.get('visible') is True
                 and state.get('playback_command') == self.command_id
-                and state.get('phase') in ('transition', 'holding')
+                and state.get('phase') in ('awaiting_native', 'transition', 'holding')
                 and time.time() - state.get('updated_at', 0) < 3)
 
     def poll(self):

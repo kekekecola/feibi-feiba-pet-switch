@@ -33,7 +33,7 @@ VK_F8 = 0x77
 MOD_NOREPEAT = 0x4000
 GWLP_WNDPROC = -4
 FORM_NAMES = {"feibi": "菲比啾比", "feiba": "菲八啾比"}
-COMMANDS = {"take-off", "put-on", "toggle", "play-take-off", "play-put-on", "hide", "quit"}
+COMMANDS = {"take-off", "put-on", "toggle", "play-take-off", "play-put-on", "confirm-native", "hide", "quit"}
 
 
 def enable_dpi_awareness() -> None:
@@ -491,11 +491,11 @@ class Player:
         if self.closed:
             return
         self._refresh_size_once()
-        self.root.after(150 if self.phase in ('transition', 'holding') else 1000, self._refresh_size)
+        self.root.after(150 if self.phase in ('awaiting_native', 'transition', 'holding') else 1000, self._refresh_size)
 
     def _refresh_size_once(self) -> None:
         size = native_pet_size()
-        dpi = window_dpi(self.root) if self.phase in ('transition', 'holding') else self.dpi_override or window_dpi(self.root)
+        dpi = window_dpi(self.root) if self.phase in ('awaiting_native', 'transition', 'holding') else self.dpi_override or window_dpi(self.root)
         if self.native_width_override:
             scale = self.native_width_override / 192 * size / self.width_sample_size * dpi / self.width_sample_dpi
         else:
@@ -514,7 +514,7 @@ class Player:
             self.root.geometry(f"{self.width}x{self.height}")
             self.root.update_idletasks()
             self.renderer.move(*position, self.width, self.height)
-            if self.phase == "transition":
+            if self.phase in ("awaiting_native", "transition"):
                 self._draw(self.active_transition[max(0, self.transition_index - 1)])
             elif self.phase == "holding":
                 self._draw(self.active_transition[-1])
@@ -547,6 +547,19 @@ class Player:
             self.playback_command = None
             self._ack(command_id, "completed", "CG 覆盖层已撤回")
             self._write_status()
+            return
+        if action == "confirm-native":
+            if (self.phase != "awaiting_native" or self.current_command is None
+                    or parameters.get("playback_id") != self.current_command
+                    or not self.renderer.visible()):
+                self._ack(command_id, "failed", "没有匹配的可见过渡等待原生确认")
+                return
+            self.root.after_cancel(self.transition_after)
+            self.transition_after = None
+            self.phase = "transition"
+            self._ack(command_id, "completed", "继续播放已确认切换的过渡")
+            self._write_status()
+            self._advance_transition()
             return
         cg_only = action in ("play-take-off", "play-put-on")
         if not self.preview and not cg_only:
@@ -608,9 +621,13 @@ class Player:
             self.renderer.move(parameters["x"], parameters["y"], self.width, self.height)
         self.transition_index = 0
         self.active_transition = self.transition if self.state.target == "feiba" else list(reversed(self.transition))
+        if parameters.get("await_native") is True and cg_only and not self.preview:
+            self.phase = "awaiting_native"
+            self.transition_after = self.root.after(11000, self.cancel_transition)
         self._write_status()
         logging.info("Transition started: %s -> %s command=%s", self.state.form, self.state.target, command_id)
-        self._advance_transition()
+        if self.phase == "transition":
+            self._advance_transition()
 
     def _advance_transition(self) -> None:
         self.transition_after = None
@@ -637,7 +654,7 @@ class Player:
         self.transition_after = self.root.after(self.transition_delay, self._advance_transition)
 
     def cancel_transition(self, _event=None) -> None:
-        if self.phase != "transition":
+        if self.phase not in ("awaiting_native", "transition"):
             return
         if self.transition_after:
             self.root.after_cancel(self.transition_after)

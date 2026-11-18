@@ -339,6 +339,40 @@ def find_overlay(windows: Windows):
             time.sleep(0.12)
 
 
+def confirm_visible_overlay(windows, original, source, target):
+    """Allow a replacement HWND and reject a renderer still showing the source label."""
+    from comtypes import COMError
+    deadline = time.monotonic() + 2
+    observed_source = False
+    while True:
+        try:
+            window = original
+            pid = wintypes.DWORD()
+            windows.user32.GetWindowThreadProcessId(original.hwnd, ctypes.byref(pid))
+            if pid.value != original.pid or not windows.user32.IsWindowVisible(original.hwnd):
+                window, _ = _find_overlay_once(windows)
+            root = automation().ControlFromHandle(window.hwnd)
+            forms = set()
+            for form in (source, target):
+                pattern = r'^' + re.escape(PET_NAMES[form]) + r'(?:\s|$)'
+                image = root.ImageControl(searchDepth=24, RegexName=pattern)
+                if exists(image, 0):
+                    forms.add(form)
+            if forms == {target}:
+                return target
+            if not forms and not observed_source:
+                # Some providers omit image labels. Visibility is still checked.
+                return None
+            observed_source |= source in forms
+        except (RuntimeError, COMError):
+            pass
+        if time.monotonic() >= deadline:
+            if observed_source:
+                raise RuntimeError('配置已切换，但原生窗口仍报告旧形态。')
+            raise RuntimeError('未找到切换后的可见原生宠物窗口。')
+        time.sleep(0.12)
+
+
 class NativeSelection:
     def __init__(self, windows: Windows):
         self.windows = windows

@@ -202,6 +202,12 @@ def transition(action, report):
     try:
         report(phase="preparing", form=source, target_form=target)
         ensure_cg(allow_start=False)
+        # Validate the fresh settings tree before hiding the original pet.
+        card = selector.prepare(target, repair=False)
+        card_ms = round((time.perf_counter()-started)*1000,1)
+        trace_focus('card-ready')
+        if native.selected_form(refresh=False) != source or not windows.user32.IsWindowVisible(overlay.hwnd):
+            raise RuntimeError('准备期间原生窗口或形态改变，已取消选择。')
         # The ImageControl bounds are the actual native sprite cell in physical pixels.
         dpi = overlay.dpi
         native_width = bounds[2] - bounds[0]
@@ -216,10 +222,10 @@ def transition(action, report):
             visibility_guard.run(windows.user32, overlay.hwnd, stop_guard, visibility_conflict, hide_cg)
 
         guard = threading.Thread(target=keep_native_hidden, daemon=True)
-        report(phase="transition", cg_position=[x, y], native_image_rect=list(bounds),
+        report(phase="selecting_native", form=source, target_form=target, cg_position=[x, y], native_image_rect=list(bounds),
                dpi=dpi, native_pet_size_px=original_size, native_visible=True)
         cg_action = "play-take-off" if target == "feiba" else "play-put-on"
-        playback = cg_ipc.Ticket(cg_action, hold=True, x=x, y=y, dpi=dpi, native_width=native_width,
+        playback = cg_ipc.Ticket(cg_action, hold=True, await_native=True, x=x, y=y, dpi=dpi, native_width=native_width,
                                  native_handoff=control.read_json(recovery_journal.JOURNAL))
         deadline = time.monotonic() + 5
         while not (playback.is_visible() and cg_visible()):
@@ -230,24 +236,24 @@ def transition(action, report):
             time.sleep(0.04)
         first_cg_ms = round((time.perf_counter() - started) * 1000, 1)
         guard.start()
-        report(native_visible=False,cg_visible=True)
+        report(phase="selecting_native", form=source, target_form=target, native_visible=False, cg_visible=True)
         trace_focus("cg-visible")
-        # Pipeline safe, complete validation into the animation instead of
-        # making the user wait for a full accessibility scan before any feedback.
-        # Repair is a connection operation, never an unbounded part of a CG.
-        card = selector.prepare(target, repair=False)
-        card_ms = round((time.perf_counter()-started)*1000,1)
-        trace_focus('card-ready')
-        if native.selected_form() != source or not windows.user32.IsWindow(overlay.hwnd):
-            raise RuntimeError('准备期间原生窗口或形态改变，已取消选择。')
-        identity = control.read_json(recovery_journal.JOURNAL)
         user = recovery_journal.api()
-        if user.GetPropW(overlay.hwnd,recovery_journal.PROPERTY) != identity.get('nonce'):
-            raise RuntimeError('原生窗口身份改变，已取消选择。')
-        selector.select(target, card, before_action=lambda: confirm_playback(playback, visibility_conflict))
-        if visibility_conflict.is_set():
-            raise RuntimeError('客户端窗口可见性冲突，已撤回CG；请查询当前形态。')
+        def check_before_action():
+            confirm_playback(playback, visibility_conflict)
+            identity = control.read_json(recovery_journal.JOURNAL)
+            if not identity or user.GetPropW(overlay.hwnd, recovery_journal.PROPERTY) != identity.get('nonce'):
+                raise RuntimeError('原生窗口身份改变，已取消选择。')
+            if native.selected_form(refresh=False) != source:
+                raise RuntimeError('准备期间原生形态改变，已取消选择。')
+        selector.select(target, card, before_action=check_before_action)
+        confirm_playback(playback, visibility_conflict)
         trace_focus("native-selected")
+        commit = cg_ipc.Ticket("confirm-native", playback_id=playback.command_id)
+        commit.communicate(timeout=2)
+        if commit.returncode != 0:
+            raise RuntimeError('无法继续播放本次已确认的过渡。')
+        report(phase="transition", form=source, target_form=target, native_visible=False, cg_visible=True)
         output, error = playback.communicate(timeout=10)
         if playback.returncode != 0:
             raise RuntimeError("CG 播放失败：" + (error or output).decode("utf-8", "replace")[-300:])
@@ -255,7 +261,7 @@ def transition(action, report):
         trace_focus("cg-completed")
         if acknowledgement.get("result") != "completed":
             raise RuntimeError("CG 未正常完成。")
-        if native.selected_form() != target:
+        if native.selected_form(refresh=False) != target:
             raise RuntimeError("播放后原生宠物选择不匹配。")
         report(phase="restoring", form=target)
     finally:
@@ -266,48 +272,53 @@ def transition(action, report):
             trace_focus("after-restore")
         except Exception:
             logging.exception("Could not restore the previous main view/focus")
-        cg_hidden = False
-        try:
-            # Stop the visibility guard before the visual handoff. Withdraw
-            # the owned CG and restore native immediately, before waiting for IPC.
-            if cg_ipc.hide_now():
-                stop_guard.set()
-                if guard and guard.ident is not None:
-                    guard.join(timeout=.2)
-                if journal_started:
-                    recovery_journal.recover(cg_visible())
-                    journal_started = False
-                    hidden = False
-            hide_cg()
-            cg_hidden = True
-        finally:
-            if cg_hidden:
-                stop_guard.set()
-                if guard and guard.ident is not None:
-                    guard.join(timeout=1)
-            elif hidden:
-                PENDING_RESTORE.append((windows, overlay, stop_guard))
-            if journal_started and cg_hidden:
-                recovery_journal.recover(False)
-            report(cg_visible=cg_visible(),
-                   native_visible=bool(windows.user32.IsWindowVisible(overlay.hwnd)))
-            if playback and playback.poll() is None:
-                playback.terminate()
-                try:
-                    playback.communicate(timeout=3)
-                except subprocess.TimeoutExpired:
-                    playback.terminate()
-    visible = bool(windows.user32.IsWindowVisible(overlay.hwnd))
-    if not visible or cg_visible():
+        if playback is not None or journal_started:
+            restore_after_playback(playback, windows, overlay, stop_guard, guard, hidden, journal_started, report)
+    displayed = native.confirm_visible_overlay(windows, overlay, source, target)
+    if cg_visible() or native.selected_form(refresh=False) != target:
         raise RuntimeError("过渡后的原生显示恢复检查失败。")
     return {"form": target, "selected_id": native.PET_IDS[target],
-            "native_switch_confirmed": True, "native_visible": visible,
-            "cg_visible": False, "native_pet_size_px": original_size,
+            "native_switch_confirmed": True, "native_visible": True,
+            "native_overlay_form": displayed, "cg_visible": False, "native_pet_size_px": original_size,
             "native_image_rect": list(bounds), "dpi": dpi,
             "timings_ms": dict(overlay=overlay_ms, prepared=card_ms, first_cg=first_cg_ms, total=round((time.perf_counter()-started)*1000, 1)),
             "foreground_before": original_foreground,
             "foreground_after": windows.user32.GetForegroundWindow(),
             "background_selection": True}
+
+
+def restore_after_playback(playback, windows, overlay, stop_guard, guard, hidden, journal_started, report):
+    cg_hidden = False
+    try:
+        # Stop the visibility guard before the visual handoff. Withdraw
+        # the owned CG and restore native immediately, before waiting for IPC.
+        if cg_ipc.hide_now():
+            stop_guard.set()
+            if guard and guard.ident is not None:
+                guard.join(timeout=.2)
+            if journal_started:
+                recovery_journal.recover(cg_visible())
+                journal_started = False
+                hidden = False
+        hide_cg()
+        cg_hidden = True
+    finally:
+        if cg_hidden:
+            stop_guard.set()
+            if guard and guard.ident is not None:
+                guard.join(timeout=1)
+        elif hidden:
+            PENDING_RESTORE.append((windows, overlay, stop_guard))
+        if journal_started and cg_hidden:
+            recovery_journal.recover(False)
+        report(cg_visible=cg_visible(),
+               native_visible=bool(windows.user32.IsWindowVisible(overlay.hwnd)))
+        if playback and playback.poll() is None:
+            playback.terminate()
+            try:
+                playback.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                playback.terminate()
 
 
 class Bridge:
@@ -450,6 +461,7 @@ class Bridge:
             result = self.pool.run(action, token, timeout=35 if not action else 22)
             if action:
                 result['worker_total_ms'] = round((time.perf_counter()-worker_started)*1000, 1)
+                result['last_switch_failure'] = None
             self.progress_path = None
             self.update(phase="idle", connection_state="ready", target_form=None, error=None, control_details=None, **result)
             self.reconnect_failures = 0
@@ -458,6 +470,12 @@ class Bridge:
             logging.info("Native transition completed: %s", result)
         except Exception as error:
             logging.exception("Native transition failed")
+            failure = {}
+            if action:
+                progress = control.read_json(self.progress_path) if self.progress_path else {}
+                failure['last_switch_failure'] = dict(stage=progress.get('phase', 'preparing'),
+                    target=progress.get('target_form'), message=str(error),
+                    details=getattr(error, 'details', None))
             # A killed COM worker cannot run its finally block. Its durable
             # journal belongs to that worker; withdraw CG before restoring native.
             try:
@@ -471,7 +489,7 @@ class Bridge:
             self.update(phase="error", connection_state="disconnected", target_form=None, error=str(error),
                         native_switch_confirmed=False,
                         control_details=getattr(error,"details",None), form=native.selected_form(),
-                        native_visible=None, cg_visible=cg_visible())
+                        native_visible=None, cg_visible=cg_visible(), **failure)
             self.ack(command_id, "failed", str(error))
         finally:
             path = self.progress_path
@@ -666,7 +684,8 @@ def main():
                         background.prepare()
                     ensure_cg()
                     def report(**data):
-                        write_json(RUNTIME / ('progress-'+token+'.json'),dict(token=token,**data))
+                        path = RUNTIME / ('progress-'+token+'.json')
+                        write_json(path, control.read_json(path) | data | {'token':token})
                     result = transition(action,report) if action else {}
                     print(json.dumps(dict(job=request['job'],result=result),ensure_ascii=False),flush=True)
                 except Exception as error:

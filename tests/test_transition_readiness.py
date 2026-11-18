@@ -13,6 +13,7 @@ import background_uia as background
 import cg_ipc
 import msaa_controls
 import native_bridge
+import player
 from request_lifecycle import claim
 
 
@@ -31,12 +32,18 @@ class TransitionReadinessTests(unittest.TestCase):
     def test_cg_gate_runs_immediately_before_native_action(self):
         selector = background.BackgroundSelection.__new__(background.BackgroundSelection)
         selector.windows = Mock()
-        selector.window = SimpleNamespace(hwnd=11)
-        with patch.object(background.native, 'preferences', return_value={}), \
+        user = selector.windows.user32
+        user.GetForegroundWindow.return_value = 99
+        user.GetSystemMetrics.return_value = 0
+        selector.window = SimpleNamespace(hwnd=11, pid=22)
+        helper = SimpleNamespace(rect=(-1000, 0, -128, 600), exstyle=0x080800A0)
+        with patch.object(background, 'window_from_state', return_value=helper), \
+             patch.object(background.native, 'preferences', return_value={}), \
              patch.object(background.msaa_controls, 'execute') as execute:
             with self.assertRaisesRegex(RuntimeError, 'CG'):
                 selector.select('feibi', object(), before_action=Mock(side_effect=RuntimeError('CG withdrawn')))
             execute.assert_not_called()
+            self.assertEqual([call.args for call in user.EnableWindow.call_args_list], [(11, True), (11, False)])
 
     def test_conflict_or_disappearing_cg_aborts(self):
         ticket = Mock()
@@ -57,9 +64,80 @@ class TransitionReadinessTests(unittest.TestCase):
         selector.window = SimpleNamespace(hwnd=11)
         with patch.object(background.msaa_controls, 'pet_actions', side_effect=RuntimeError('stale')), \
              patch.object(background, 'prepare') as repair:
-            with self.assertRaisesRegex(RuntimeError, '本次切换已取消'):
+            with self.assertRaisesRegex(RuntimeError, '后台宠物页面失效'):
                 selector.prepare('feibi', repair=False)
             repair.assert_not_called()
+
+    def test_stale_pet_controls_do_not_start_cg(self):
+        selector = Mock()
+        selector.prepare.side_effect = RuntimeError('stale controls')
+        with patch.object(native_bridge.native, 'selected_form', return_value='feibi'), \
+             patch.object(native_bridge.native, 'Windows'), \
+             patch.object(native_bridge.native, 'find_overlay', return_value=(Mock(), [0, 0, 192, 208])), \
+             patch.object(native_bridge.native, 'preferences', return_value={}), \
+             patch.object(native_bridge.background, 'BackgroundSelection', return_value=selector), \
+             patch.object(native_bridge, 'ensure_cg'), patch.object(native_bridge, 'trace_focus'), \
+             patch.object(native_bridge.cg_ipc, 'Ticket') as ticket:
+            with self.assertRaisesRegex(RuntimeError, 'stale controls'):
+                native_bridge.transition('take-off', Mock())
+            ticket.assert_not_called()
+
+    def waiting_player(self):
+        obj = player.Player.__new__(player.Player)
+        obj.state = player.FormState('feibi')
+        obj.phase = 'idle'
+        obj.preview = False
+        obj.transition = [object(), object()]
+        obj.root = Mock()
+        obj.renderer = Mock()
+        obj._draw = Mock()
+        obj._ack = Mock()
+        obj._write_status = Mock()
+        obj._refresh_size_once = Mock()
+        obj._advance_transition = Mock()
+        with patch.object(player,'native_pet_size',return_value=112), patch.object(player,'window_dpi',return_value=96):
+            obj.request('play-take-off', 'a'*32, {'await_native':True})
+        return obj
+
+    def test_cg_waits_for_confirmation_of_same_playback(self):
+        obj = self.waiting_player()
+        self.assertEqual(obj.phase, 'awaiting_native')
+        obj._draw.assert_called_once_with(obj.transition[0])
+        obj._advance_transition.assert_not_called()
+        obj.request('confirm-native', 'b'*32, {'playback_id':'c'*32})
+        obj._advance_transition.assert_not_called()
+        obj.request('confirm-native', 'b'*32, {'playback_id':'a'*32})
+        obj._advance_transition.assert_called_once()
+        self.assertEqual(obj.phase, 'transition')
+
+    def test_unconfirmed_cg_cancels_without_transforming(self):
+        obj = self.waiting_player()
+        obj.cancel_transition()
+        obj.request('confirm-native', 'b'*32, {'playback_id':'a'*32})
+        obj._advance_transition.assert_not_called()
+        obj.renderer.hide.assert_called_once()
+        self.assertEqual(obj.state.form, 'feibi')
+        self.assertEqual(obj._ack.call_args_list[0].args[:2], ('a'*32, 'cancelled'))
+
+    def test_reported_old_overlay_is_not_counted_as_completed(self):
+        native = native_bridge.native
+        windows = Mock()
+        windows.user32.GetWindowThreadProcessId.side_effect = lambda hwnd, pid: setattr(pid._obj, 'value', 22)
+        windows.user32.IsWindowVisible.return_value = True
+        with patch.object(native, 'automation'), patch.object(native, 'exists', side_effect=[True, False]), \
+             patch.object(native.time, 'monotonic', side_effect=[0, 3]):
+            with self.assertRaisesRegex(RuntimeError, '旧形态'):
+                native.confirm_visible_overlay(windows, SimpleNamespace(hwnd=11, pid=22), 'feibi', 'feiba')
+
+    def test_switch_accepts_confirmed_replacement_native_window(self):
+        native = native_bridge.native
+        windows = Mock()
+        windows.user32.IsWindowVisible.return_value = False
+        with patch.object(native, '_find_overlay_once', return_value=(SimpleNamespace(hwnd=99), (0, 0, 192, 208))), \
+             patch.object(native, 'automation') as auto, patch.object(native, 'exists', side_effect=[False, True]):
+            form = native.confirm_visible_overlay(windows, SimpleNamespace(hwnd=11, pid=22), 'feibi', 'feiba')
+            self.assertEqual(form, 'feiba')
+            auto.return_value.ControlFromHandle.assert_called_once_with(99)
 
     def test_delayed_cg_command_expires_before_it_can_start(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(cg_ipc, 'RUNTIME', Path(folder)):

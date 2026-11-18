@@ -1,6 +1,5 @@
 from pathlib import Path
 import sys,tempfile,json,time
-from types import SimpleNamespace
 from unittest.mock import Mock,patch
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
@@ -38,18 +37,6 @@ class IdleEfficiencyTests(unittest.TestCase):
             obj.reconnect_if_needed()
             obj.update.assert_not_called();windows.assert_not_called()
             self.assertGreater(obj.next_health_check,time.monotonic())
-
-    def test_compact_layout_failure_restores_original_dimensions(self):
-        windows=Mock();windows.user32.GetSystemMetrics.return_value=0
-        window=SimpleNamespace(hwnd=11,rect=(0,0,2200,1600),dpi=168)
-        with patch.object(b,'api',return_value=(windows,Mock())), \
-             patch.object(b.msaa_controls,'pet_actions',side_effect=RuntimeError('layout')):
-            self.assertFalse(b.compact_helper(window))
-        calls=windows.user32.SetWindowPos.call_args_list
-        self.assertEqual(calls[-1].args[4:6],(2200,1600))
-
-    def test_small_helper_is_not_enlarged(self):
-        self.assertFalse(b.compact_helper(SimpleNamespace(rect=(0,0,800,600),dpi=96)))
 
     def test_known_pet_heartbeat_skips_global_client_state(self):
         with patch.object(native,'preferences',return_value={'selected-avatar-id':'pet_known'}), \

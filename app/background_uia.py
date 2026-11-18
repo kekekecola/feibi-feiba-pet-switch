@@ -205,35 +205,7 @@ def restore_setup_focus(target, helper, original_main=None):
         time.sleep(0.06)
 
 
-def compact_helper(window):
-    width,height=window.rect[2]-window.rect[0],window.rect[3]-window.rect[1]
-    target_w,target_h=min(width,round(900*window.dpi/96)),min(height,round(640*window.dpi/96))
-    if (width,height)==(target_w,target_h):
-        return False
-    windows,_=api();user=windows.user32
-    user.SetWindowPos.argtypes=[wintypes.HWND,wintypes.HWND,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.UINT]
-    def size(w,h):
-        user.SetWindowPos(window.hwnd,wintypes.HWND(1),user.GetSystemMetrics(76)-w-128,
-            user.GetSystemMetrics(77),w,h,0x0010 | 0x0040)
-    size(target_w,target_h)
-    try:
-        msaa_controls.pet_actions(window.hwnd,native.PET_NAMES)
-    except Exception:
-        size(width,height)
-        logging.info('Compact helper layout unavailable; restored its prior size')
-        return False
-    return True
-
-
 def prepare(rebuild=True):
-    result=_prepare(rebuild)
-    helper=owned_window()
-    if helper:
-        result['helper_compacted']=compact_helper(helper)
-    return result
-
-
-def _prepare(rebuild=True):
     existing = owned_window()
     if existing:
         try:
@@ -251,15 +223,17 @@ def _prepare(rebuild=True):
             return {"prepared": True, "hwnd": existing.hwnd, "reused": True}
         try:
             return finish_prepare(existing)
-        except msaa_controls.PetControlsError:
-            raise
-        except RuntimeError:
-            if not rebuild:
+        except RuntimeError as error:
+            ambiguous = isinstance(error, msaa_controls.PetControlsError) and (
+                error.details['duplicates'] or error.details['traversal_limited'])
+            if not rebuild or ambiguous:
                 raise
             # A stale Chromium renderer can retain a marked HWND indefinitely.
             # Replace our helper once; never close or navigate the user's view.
             logging.warning('Background navigation failed; replacing owned helper once')
             close()
+            if owned_window():
+                raise RuntimeError('旧辅助窗口未关闭，稍后重试后台连接。') from error
             return prepare(rebuild=False)
     windows, _ = api()
     main = windows.main()
@@ -464,7 +438,9 @@ class BackgroundSelection:
             if isinstance(error, msaa_controls.PetControlsError) and error.details['duplicates']:
                 raise
             if not repair:
-                raise RuntimeError('后台宠物页面失效，本次切换已取消；后台将重新准备，请就绪后再按快捷键。') from error
+                if isinstance(error, msaa_controls.PetControlsError):
+                    raise
+                raise RuntimeError('后台宠物页面失效，后台将重新准备。') from error
             # No native selection has happened yet: rebuilding here cannot
             # repeat a toggle which may already have taken effect.
             logging.warning('Pet controls stale; repairing helper before selection')
@@ -480,23 +456,35 @@ class BackgroundSelection:
     def select(self, target, card, before_action=None):
         user = self.windows.user32
         user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
-        user.EnableWindow(self.window.hwnd, False)
+        # Some Chromium providers silently ignore MSAA actions when the parent
+        # HWND is disabled. Enable only the verified, click-through parked helper.
+        windows, _ = api()
+        hwnd = self.window.hwnd
+        identity = {'hwnd': hwnd, 'pid': self.window.pid}
+        helper = window_from_state(windows, identity)
+        required_styles = 0x00080000 | 0x08000000 | 0x20 | 0x80
+        if (not helper or helper.rect[2] > user.GetSystemMetrics(76)
+                or (helper.exstyle & required_styles) != required_styles or helper.exstyle & 0x8
+                or user.GetForegroundWindow() == hwnd):
+            raise RuntimeError('辅助窗口未安全停放，已取消原生选择。')
+        previous_id = native.preferences().get('selected-avatar-id')
         try:
-            previous_id = native.preferences().get('selected-avatar-id')
+            user.EnableWindow(hwnd, True)
             if before_action:
                 before_action()
             msaa_controls.execute(card)
             deadline = time.monotonic() + 6
             while time.monotonic() < deadline:
-                if native.selected_form() == target:
+                if native.selected_form(refresh=False) == target:
                     return
                 if native.preferences().get('selected-avatar-id') != previous_id:
                     if native.reconcile_selected(target) == target:
                         return
                 time.sleep(0.08)
-            raise RuntimeError("后台原生选择没有得到确认。")
+            raise RuntimeError("原生宠物选择没有得到确认，请在诊断中查看本次切换结果。")
         finally:
-            user.EnableWindow(self.window.hwnd, False)
+            if window_from_state(windows, identity):
+                user.EnableWindow(hwnd, False)
 
     def restore(self):
         # Re-created Chromium windows can request focus after loading completes.

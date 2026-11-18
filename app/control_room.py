@@ -383,7 +383,10 @@ class ControlRoom:
         self.round(255,232,45,45,18,'#EDF5EF')
         self.text(278,255,'✓',25,C['green'],anchor='center',latin=True)
         self.text(318,230,'伙伴已就位' if ready else '伙伴连接中',25,bold=True)
-        self.text(318,271,'原生宠物  ·  自适应大小',15,C['muted'])
+        if state.get('last_switch_failure'):
+            self.text(318,271,'上次切换未完成，可查看诊断详情',15,'#9A5760')
+        else:
+            self.text(318,271,'原生宠物  ·  自适应大小',15,C['muted'])
         self.card(232,338,426,220)
         names={'feibi':'菲比啾比 · 戴帽','feiba':'菲八啾比 · 摘帽'}
         rows=[('当前形态',names.get(state.get('form'),'等待识别')),('切换快捷键',state.get('hotkey','F8')),
@@ -560,7 +563,7 @@ class ControlRoom:
             self.show()
         if self.root.state()!='withdrawn' and self.tab!=0 and not self.detail and not self.busy and not self.resizing:
             state=read('bridge-status.json');updater=read('update-status.json')
-            snapshot=tuple(state.get(k) for k in ('phase','form','hotkey','version','error'))+tuple(updater.get(k) for k in ('phase','installed_version','latest_version','error'))
+            snapshot=tuple(state.get(k) for k in ('phase','form','hotkey','version','error','last_switch_failure'))+tuple(updater.get(k) for k in ('phase','installed_version','latest_version','error'))
             if snapshot!=self.last_snapshot:
                 self.last_snapshot=snapshot
                 self.draw()
