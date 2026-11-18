@@ -237,7 +237,7 @@ def prepare(rebuild=True):
             msaa_controls.pet_actions(existing.hwnd, native.PET_NAMES)
             ready = True
         except RuntimeError as error:
-            if isinstance(error, msaa_controls.PetControlsError) and error.details['duplicates']:
+            if ambiguous_cards(error):
                 raise
             ready = False
         if ready:
@@ -249,9 +249,7 @@ def prepare(rebuild=True):
         try:
             return finish_prepare(existing)
         except RuntimeError as error:
-            ambiguous = isinstance(error, msaa_controls.PetControlsError) and (
-                error.details['duplicates'] or error.details['traversal_limited'])
-            if not rebuild or ambiguous:
+            if not rebuild or ambiguous_cards(error):
                 raise
             # A stale Chromium renderer can retain a marked HWND indefinitely.
             # Replace our helper once; never close or navigate the user's view.
@@ -327,7 +325,7 @@ def prepare(rebuild=True):
 
 def setup_control(root, key, timeout=.2):
     # Client releases expose the same entry as either a menu item, button or tab.
-    kinds = ('ButtonControl', 'TabItemControl') if key == 'pets' else ('MenuItemControl', 'ButtonControl')
+    kinds = ('ButtonControl', 'TabItemControl', 'HyperlinkControl') if key == 'pets' else ('MenuItemControl', 'ButtonControl')
     for kind in kinds:
         control = getattr(root, kind)(searchDepth=28, RegexName=ui_labels.pattern(key))
         if native.exists(control, timeout):
@@ -360,7 +358,23 @@ def navigate_setup(root, helper, key, destination):
         raise RuntimeError('后台导航没有响应：' + key)
 
 
-def finish_prepare(helper):
+def ambiguous_cards(error):
+    return isinstance(error, msaa_controls.PetControlsError) and (
+        error.details['duplicates'] or error.details['traversal_limited'])
+
+
+def wait_for_pet_actions(hwnd, seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return msaa_controls.pet_actions(hwnd, native.PET_NAMES)
+        except RuntimeError as error:
+            if ambiguous_cards(error) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+
+
+def finish_prepare(helper, target=None):
     windows, _ = api()
     user = windows.user32
     user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
@@ -373,43 +387,28 @@ def finish_prepare(helper):
     user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
     try:
-        return _finish_prepare(helper)
+        return _finish_prepare(helper, target)
     finally:
-        invisible(helper)
-        user.EnableWindow(helper.hwnd, False)
+        try:
+            invisible(helper)
+        finally:
+            user.EnableWindow(helper.hwnd, False)
 
 
-def _finish_prepare(helper):
-    windows, _ = api()
-    user = windows.user32
-    user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
-    # A new window can restore the already-open Pets settings route. Avoid
-    # reopening profile menus over a selection page that is already ready.
-    try:
-        msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
-    except msaa_controls.PetControlsError as error:
-        if error.details['duplicates']:
-            raise
-    except RuntimeError:
-        pass
-    else:
-        invisible(helper)
-        user.EnableWindow(helper.hwnd, False)
-        return {'prepared':True, 'hwnd':helper.hwnd, 'reused':True}
-    user.EnableWindow(helper.hwnd, True)
+def _finish_prepare(helper, target=None):
     r = native.automation().ControlFromHandle(helper.hwnd)
     # New windows may asynchronously restore the settings route. Wait for a
     # usable route rather than treating its temporary blank tree as menu failure.
     deadline = time.monotonic() + 10
     while True:
         try:
-            msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
+            actions = msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
+            if target:
+                return actions[target]
             return {'prepared':True, 'hwnd':helper.hwnd, 'reused':True}
-        except msaa_controls.PetControlsError as error:
-            if error.details['duplicates']:
+        except RuntimeError as error:
+            if ambiguous_cards(error):
                 raise
-        except RuntimeError:
-            pass
         if (setup_control(r, 'pets', .1) is not None
                 or setup_control(r, 'settings', .1) is not None
                 or setup_control(r, 'profile', .1) is not None):
@@ -425,25 +424,26 @@ def _finish_prepare(helper):
             navigate_setup(r, helper, 'profile', lambda: setup_control(r, 'settings', .6) is not None)
         navigate_setup(r, helper, 'settings', lambda: setup_control(r, 'pets', .6) is not None)
     section = setup_control(r, 'pets')
+    if section is None:
+        raise RuntimeError('后台宠物设置入口在加载期间消失。')
     try:
         msaa_controls.execute(msaa_controls.semantic_action(helper.hwnd, ui_labels.pattern('pets')))
-    except RuntimeError:
+    except Exception:
         invoke_background(section)
     try:
-        msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
-    except RuntimeError:
+        # Opening the section and receiving the pet list are asynchronous.
+        # Give it time to fill before retrying the navigation.
+        actions = wait_for_pet_actions(helper.hwnd, 4)
+    except RuntimeError as error:
+        if ambiguous_cards(error):
+            raise
+        section = setup_control(r, 'pets')
+        if section is None:
+            raise
         click_background(section, helper)
-        deadline = time.monotonic() + 12
-        while True:
-            try:
-                msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
-                break
-            except RuntimeError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(.4)
-    invisible(helper)
-    user.EnableWindow(helper.hwnd, False)
+        actions = wait_for_pet_actions(helper.hwnd, 5)
+    if target:
+        return actions[target]
     return {"prepared": True, "hwnd": helper.hwnd, "reused": False}
 
 
@@ -459,12 +459,12 @@ class BackgroundSelection:
         self.root = native.automation().ControlFromHandle(self.window.hwnd)
         self.foreground_before = windows.user32.GetForegroundWindow()
 
-    def prepare(self, target, repair=True):
+    def prepare(self, target, repair=True, reuse_only=False):
         self.repaired = False
         try:
             return msaa_controls.pet_actions(self.window.hwnd, native.PET_NAMES)[target]
         except RuntimeError as error:
-            if isinstance(error, msaa_controls.PetControlsError) and error.details['duplicates']:
+            if ambiguous_cards(error):
                 raise
             if not repair:
                 if isinstance(error, msaa_controls.PetControlsError):
@@ -473,6 +473,15 @@ class BackgroundSelection:
             # No native selection has happened yet: rebuilding here cannot
             # repeat a toggle which may already have taken effect.
             logging.warning('Pet controls stale; repairing helper before selection')
+            if reuse_only:
+                # This attempt occurs before the first CG frame and repairs
+                # only the helper already owned by this request.
+                existing = owned_window()
+                if not existing or (existing.hwnd, existing.pid) != (self.window.hwnd, self.window.pid):
+                    raise RuntimeError('辅助窗口已变更，后台将重新连接。') from error
+                action = finish_prepare(existing, target)
+                self.repaired = True
+                return action
             prepare()
             window = owned_window()
             if window is None:

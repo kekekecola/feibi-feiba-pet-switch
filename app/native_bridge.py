@@ -204,7 +204,7 @@ def transition(action, report):
         report(phase="preparing", form=source, target_form=target)
         ensure_cg(allow_start=False)
         # Validate the fresh settings tree before hiding the original pet.
-        card = selector.prepare(target, repair=False)
+        card = selector.prepare(target, reuse_only=True)
         card_ms = round((time.perf_counter()-started)*1000,1)
         trace_focus('card-ready')
         if native.selected_form(refresh=False) != source or not windows.user32.IsWindowVisible(overlay.hwnd):

@@ -80,6 +80,44 @@ class TransitionReadinessTests(unittest.TestCase):
                 selector.prepare('feibi', repair=False)
             repair.assert_not_called()
 
+    def test_f8_recovers_loading_owned_helper_before_cg(self):
+        helper = SimpleNamespace(hwnd=11, pid=22)
+        selector = background.BackgroundSelection.__new__(background.BackgroundSelection)
+        selector.window = helper
+        missing = msaa_controls.PetControlsError(['菲比啾比', '菲八啾比'], [], {})
+        card = object()
+        with patch.object(background.msaa_controls, 'pet_actions', side_effect=missing), \
+             patch.object(background, 'owned_window', return_value=helper), \
+             patch.object(background, 'finish_prepare', return_value=card) as repair:
+            self.assertIs(selector.prepare('feibi', reuse_only=True), card)
+            repair.assert_called_once_with(helper, 'feibi')
+            self.assertTrue(selector.repaired)
+
+    def test_slow_list_arrival_does_not_repeat_pets_navigation(self):
+        helper = SimpleNamespace(hwnd=11)
+        missing = msaa_controls.PetControlsError(['菲比啾比', '菲八啾比'], [], {})
+        card = object()
+        with patch.object(background.native, 'automation'), \
+             patch.object(background.ui_labels, 'pattern', return_value='pets'), \
+             patch.object(background, 'setup_control', return_value=Mock()), \
+             patch.object(background.msaa_controls, 'semantic_action', return_value=Mock()), \
+             patch.object(background.msaa_controls, 'execute') as invoke, \
+             patch.object(background.msaa_controls, 'pet_actions', side_effect=[missing, missing, {'feibi':card}]), \
+             patch.object(background, 'click_background') as click, patch.object(background.time, 'sleep'):
+            self.assertIs(background._finish_prepare(helper, 'feibi'), card)
+            invoke.assert_called_once()
+            click.assert_not_called()
+
+    def test_ambiguous_list_is_not_repaired_or_clicked(self):
+        selector = background.BackgroundSelection.__new__(background.BackgroundSelection)
+        selector.window = SimpleNamespace(hwnd=11)
+        error = msaa_controls.PetControlsError([], ['菲比啾比'], {'菲比啾比':2})
+        with patch.object(background.msaa_controls, 'pet_actions', side_effect=error), \
+             patch.object(background, 'finish_prepare') as repair:
+            with self.assertRaises(msaa_controls.PetControlsError):
+                selector.prepare('feibi', reuse_only=True)
+            repair.assert_not_called()
+
     def test_stale_pet_controls_do_not_start_cg(self):
         selector = Mock()
         selector.prepare.side_effect = RuntimeError('stale controls')

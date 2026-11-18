@@ -13,7 +13,7 @@ class PetControlsError(RuntimeError):
         self.details = dict(missing=missing, duplicates=duplicates, matches=counts, traversal_limited=limit)
         parts = []
         if missing:
-            parts.append('宠物选择页未找到：' + '、'.join(missing) + '；请确认两只均已导入且名称与配置一致')
+            parts.append('后台未读到宠物卡片：' + '、'.join(missing) + '；请确认两只在客户端宠物库可见且名称与配置一致')
         if duplicates:
             parts.append('存在同名可操作条目：' + '、'.join(duplicates) + '；请选定保留的一套或改成唯一名称')
         if limit:
@@ -75,11 +75,19 @@ def scan_actions(hwnd, inspect_action, include=lambda name: True):
         return key
 
     def inspect(obj, child):
-        name = str(obj.accName(child) or '')
-        role = obj.accRole(child)
-        if role not in ACTION_ROLES or not include(name):
+        try:
+            role = obj.accRole(child)
+            if role not in ACTION_ROLES:
+                return
+            name = str(obj.accName(child) or '')
+            if not include(name):
+                return
+            default_action = obj.accDefaultAction(child)
+        except comtypes.COMError:
+            # A node missing a property must not hide all of its siblings or
+            # descendants, especially when Chromium is reloading the page.
             return
-        inspect_action((identity(obj),child), name, role, obj.accDefaultAction(child), (obj,child))
+        inspect_action((identity(obj),child), name, role, default_action, (obj,child))
 
     def walk(obj, depth=0):
         nonlocal visited, limited
@@ -103,7 +111,12 @@ def scan_actions(hwnd, inspect_action, include=lambda name: True):
                 oleacc.AccessibleChildren(obj, offset, size, children, ctypes.byref(retrieved))
                 for child in children[:retrieved.value]:
                     if child.vt in (9, 13):
-                        walk(child.value.QueryInterface(IAccessible), depth + 1)
+                        try:
+                            element = child.value.QueryInterface(IAccessible)
+                        except comtypes.COMError:
+                            limited = True
+                            continue
+                        walk(element, depth + 1)
                     elif child.vt == 3:
                         inspect(obj, child.value)
                 if visited > 8000:
