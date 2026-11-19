@@ -137,6 +137,23 @@ class Windows:
         finally:
             self.kernel32.CloseHandle(handle)
 
+    def process_session(self, pid):
+        """Return a process-instance identity that survives a bridge restart."""
+        handle = self.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        get_times = self.kernel32.GetProcessTimes
+        get_times.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        get_times.restype = wintypes.BOOL
+        times = [wintypes.FILETIME() for _ in range(4)]
+        try:
+            if get_times(handle, *(ctypes.byref(value) for value in times)):
+                stamp = times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
+                return f'{pid}:{stamp}'
+        finally:
+            self.kernel32.CloseHandle(handle)
+        return None
+
     def enumerate(self) -> list[NativeWindow]:
         result = []
         paths = {}

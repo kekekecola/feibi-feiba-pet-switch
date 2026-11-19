@@ -349,6 +349,8 @@ class Bridge:
         self.next_manual_reconnect = 0
         self.next_health_check = 0
         self.next_maintenance = 0
+        self.update_client_pid = None
+        self.update_client_session = None
         self.last_activity = time.monotonic()
         self.state = {"running": True, "pid": os.getpid(), "phase": "starting",
                       "connection_state": "starting", "pending_switch": False,
@@ -397,7 +399,7 @@ class Bridge:
             return
         if action == 'update':
             if not os.environ.get('FEIBI_SWITCH_HOME'):
-                self.update(update_error='尚未开启自动更新，请运行项目的“开启自动更新.cmd”。')
+                self.update(update_error='请运行新版“更新程序.cmd”接入自动更新。')
                 action = 'diagnose'
             else:
                 result = subprocess.run(['schtasks', '/Run', '/TN', 'FeibiFeibaPetSwitchUpdate'],
@@ -620,9 +622,14 @@ class Bridge:
     def reconnect_if_needed(self):
         if self.closing or self.busy or time.monotonic() < self.next_reconnect:
             return
-        if (self.state.get('connection_state') == 'sleeping' and self.state.get('memory_saving')
-                and not self.pending_request):
-            return
+        sleeping = (self.state.get('connection_state') == 'sleeping' and self.state.get('memory_saving')
+                    and not self.pending_request)
+        if sleeping:
+            if not os.environ.get('FEIBI_SWITCH_HOME'):
+                return
+            if (self.update_client_pid and
+                    native.Windows().process_session(self.update_client_pid) == self.update_client_session):
+                return
         if (self.state.get('connection_state')=='ready' and not recovery_journal.JOURNAL.exists()
                 and time.monotonic()<self.next_health_check):
             return
@@ -641,7 +648,12 @@ class Bridge:
                 windows = native.Windows()
                 main_window = windows.main()
             except RuntimeError:
+                if sleeping:
+                    return
                 self.update(phase="waiting_gpt", connection_state="waiting_gpt", native_switch_confirmed=False, error=None)
+                return
+            self.observe_client_launch(windows, main_window.pid)
+            if sleeping:
                 return
             if not background.owned_window() and windows.user32.IsIconic(main_window.hwnd):
                 self.update(phase='waiting_window', connection_state='waiting_window', native_switch_confirmed=False, error=None)
@@ -654,6 +666,29 @@ class Bridge:
             logging.exception("Connection check failed")
             self.next_reconnect = time.monotonic() + 8
             self.update(connection_state="disconnected", error=str(error))
+
+    def observe_client_launch(self, windows, pid):
+        if not os.environ.get('FEIBI_SWITCH_HOME'):
+            return
+        session = windows.process_session(pid)
+        if not session or session == self.update_client_session:
+            return
+        self.update_client_pid = pid
+        self.update_client_session = session
+        if control.read_json(RUNTIME / 'auto-update-session.json').get('session') == session:
+            return
+        threading.Thread(target=self.schedule_launch_update, args=(session,), daemon=True).start()
+
+    def schedule_launch_update(self, session):
+        try:
+            subprocess.run([str(Path(sys.executable).with_name('python.exe')),
+                            str(APP_DIR.parent / 'manager.py'), 'update-on-client-launch', session,
+                            '--home', os.environ['FEIBI_SWITCH_HOME']],
+                           check=True, capture_output=True, timeout=50, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.update(update_error=None)
+        except (OSError, subprocess.SubprocessError):
+            logging.exception('Could not schedule the Codex launch update')
+            self.update(update_error='启动时未能检查更新，可在控制室手动检查。')
 
     def ack(self, command_id, result, message):
         if command_id:

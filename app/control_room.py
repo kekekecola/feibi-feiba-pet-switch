@@ -422,7 +422,13 @@ class ControlRoom:
         self.card(232,204,426,159)
         self.text(255,231,'版本更新',23,bold=True)
         self.text(255,270,'已安装  v'+state.get('installed_version','1.5.1'),19)
-        self.text(255,307,'本机外观试用 · 自动覆盖已暂停' if read('local-theme-review.json').get('active') else '登录时及每 30 分钟检查稳定版',15,C['muted'])
+        if state.get('automatic_updates') is False:
+            update_label = '自动更新已关闭'
+        elif os.environ.get('FEIBI_SWITCH_HOME') or (DATA.parent/'current.json').is_file():
+            update_label = '每次打开 Codex 检查一次'
+        else:
+            update_label = '运行新版更新程序接入自动更新'
+        self.text(255,307,update_label,15,C['muted'])
         self.button(494,260,140,42,'检查更新',self.check_update,small=True)
         self.card(232,385,426,171)
         self.text(255,410,'状态与诊断',23,bold=True)
@@ -512,7 +518,7 @@ class ControlRoom:
 
     def check_update(self):
         if not os.environ.get('FEIBI_SWITCH_HOME') and not (DATA.parent/'current.json').exists():
-            self.notice('自动更新未开启，请点使用说明查看开启方法。')
+            self.notice('请运行新版“更新程序.cmd”接入自动更新。')
             return
         if read('local-theme-review.json').get('active'):
             self.notice('本机外观试用中，暂不自动覆盖这版界面。')

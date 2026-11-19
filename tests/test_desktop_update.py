@@ -246,11 +246,42 @@ class DesktopUpdateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 manager.version(value)
 
-    def test_update_schedule_repeats_every_thirty_minutes(self):
+    def test_update_task_has_no_scheduled_trigger(self):
         xml = manager.scheduler_xml(Path('C:/example'), Path('C:/example/python.exe'), 'S-1-test', 'update')
-        self.assertIn('PT30M', xml)
+        self.assertNotIn('Trigger', xml)
         self.assertIn('PT20M', xml)
         self.assertIn('InteractiveToken', xml)
+        self.assertIn('LogonTrigger', manager.scheduler_xml(Path('C:/example'), Path('C:/example/python.exe'), 'S-1-test', 'run'))
+
+    def test_launch_updates_once_per_process_instance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            with patch('install_transaction.task_snapshot', return_value={'exists':False}), \
+                 patch.object(manager, 'ensure_updater', return_value=True), patch.object(manager, 'run') as run:
+                manager.update_on_client_launch(home, '42:100')
+                manager.update_on_client_launch(home, '42:100')  # Bridge restarted.
+                manager.update_on_client_launch(home, '42:200')  # PID was reused.
+            self.assertEqual(run.call_count, 2)
+
+    def test_running_updater_is_not_launched_a_second_time(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            with patch('install_transaction.task_snapshot', return_value={'exists':True,'running':True}), \
+                 patch.object(manager, 'ensure_updater', return_value=True), patch.object(manager, 'run') as run:
+                manager.update_on_client_launch(home, '42:100')
+                manager.update_on_client_launch(home, '42:100')
+            run.assert_not_called()
+
+    def test_legacy_timer_is_replaced_by_an_on_demand_update_task(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder).resolve()
+            current = initial_pointer(home)
+            xml = manager.scheduler_xml(home, home/current['python'], 'test', 'update')
+            periodic = xml.replace('<Principals>', '<Triggers><TimeTrigger /></Triggers><Principals>')
+            with patch('install_transaction.task_snapshot', return_value={'exists':True,'xml':periodic}), \
+                 patch.object(manager, 'user_sid', return_value='test'), patch.object(manager, 'register') as register:
+                self.assertTrue(manager.ensure_updater(home))
+            self.assertEqual(register.call_args.args, (manager.UPDATE_TASK, xml))
 
     def test_interrupted_update_restores_previous_pointer(self):
         with tempfile.TemporaryDirectory() as folder:

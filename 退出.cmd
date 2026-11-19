@@ -1,2 +1,4 @@
 @echo off
-"%~dp0.venv\Scripts\python.exe" "%~dp0manager.py" stop
+cd /d "%~dp0"
+py -3 manager.py stop
+if errorlevel 1 pause

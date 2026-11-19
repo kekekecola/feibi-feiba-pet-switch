@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-"%~dp0.venv\Scripts\python.exe" manager.py enable
+py -3 install.py update --enable-auto-updates
 pause

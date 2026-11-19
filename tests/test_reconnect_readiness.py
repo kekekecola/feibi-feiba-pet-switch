@@ -21,6 +21,8 @@ class ReconnectReadinessTests(unittest.TestCase):
         service.next_reconnect = 100
         service.next_manual_reconnect = 0
         service.next_health_check = 0
+        service.update_client_pid = None
+        service.update_client_session = None
         service.last_activity = 0
         service.pool = Mock()
         service.state = dict(running=True, form='feiba', phase='error',
@@ -39,7 +41,7 @@ class ReconnectReadinessTests(unittest.TestCase):
         service = self.service()
         service.next_reconnect = 0
         windows = Mock()
-        windows.main.return_value = SimpleNamespace(hwnd=11)
+        windows.main.return_value = SimpleNamespace(hwnd=11, pid=42)
         windows.user32.IsIconic.side_effect = [True, False]
         with patch.object(bridge.native, 'Windows', return_value=windows), \
              patch.object(bridge.background, 'owned_window', return_value=None), \

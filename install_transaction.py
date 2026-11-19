@@ -16,6 +16,7 @@ def task_snapshot(task=TASK):
               "$t=@(Get-ScheduledTask | Where-Object { $_.TaskName -eq 'FeibiFeibaPetSwitch' -and $_.TaskPath -eq '\\' }); "
               "if ($t.Count -eq 0) { @{exists=$false} | ConvertTo-Json -Compress } "
               "else { @{exists=$true; running=($t[0].State -eq 'Running'); "
+              "enabled=($t[0].State -ne 'Disabled'); "
               "xml=(Export-ScheduledTask -TaskName 'FeibiFeibaPetSwitch')} | ConvertTo-Json -Compress }")
     script = script.replace(TASK, task)
     result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],

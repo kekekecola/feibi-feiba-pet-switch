@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / 'app'))
 import install as installer
 import install_transaction
 import maintenance
+import manager
 
 
 class ReliabilityTests(unittest.TestCase):
@@ -38,53 +39,62 @@ class ReliabilityTests(unittest.TestCase):
             installer.stop_service(Path(sys.executable))
             self.assertEqual(command.call_args.args[0][1], '/End')
 
-    def test_install_failures_restore_both_pets_config_and_task(self):
+    def test_managed_install_failures_restore_pets_config_and_tasks(self):
         for stage in ('copy', 'configure', 'create', 'run'):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
-                home = root / 'home'
+                source = root / 'bundle'
+                client = root / 'client'
+                managed = root / 'managed'
                 before = {}
                 for pet in ('feibi-jiubi', 'feiba-jiubi'):
                     for name in ('pet.json', 'spritesheet.webp'):
-                        source = root / 'pets' / pet / name
-                        target = home / 'pets' / pet / name
-                        source.parent.mkdir(parents=True, exist_ok=True)
+                        original = source / 'pets' / pet / name
+                        target = client / 'pets' / pet / name
+                        original.parent.mkdir(parents=True, exist_ok=True)
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        source.write_bytes(json.dumps({'spritesheetPath':'spritesheet.webp'}).encode() if name=='pet.json' else b'new pet')
+                        original.write_bytes(json.dumps({'spritesheetPath':'spritesheet.webp'}).encode() if name=='pet.json' else b'new pet')
                         target.write_bytes(b'old pet')
                         before[target] = target.read_bytes()
-                config = root / 'app' / 'runtime' / 'pet-roles.json'
+                (source/'VERSION').write_text('1.6.14', encoding='utf-8')
+                (source/'launcher.py').write_text('# stable launcher', encoding='utf-8')
+                config = managed / 'runtime' / 'pet-roles.json'
                 config.parent.mkdir(parents=True)
                 config.write_bytes(b'old config')
                 before[config] = b'old config'
-                snapshot = {'exists': True, 'running': True, 'xml': '<old-task/>'}
-                def configure(args):
-                    config.write_bytes(b'new config')
+                snapshot = {'exists': False}
+                def configure(args, path):
+                    path.write_bytes(b'new config')
                     if stage == 'configure':
                         raise OSError('configuration fault')
-                def command(args, **kwargs):
-                    if (stage == 'create' and '/Create' in args) or (stage == 'run' and '/Run' in args):
+                def register(name, xml):
+                    if stage == 'create' and name == manager.UPDATE_TASK:
                         raise OSError('scheduler fault')
+                def activate(*args, **kwargs):
+                    if stage == 'run':
+                        raise OSError('scheduler start fault')
                 real_copy = installer.shutil.copy2
-                def copy(source, destination, **kwargs):
-                    if stage == 'copy' and Path(source) == root / 'pets' / 'feiba-jiubi' / 'spritesheet.webp':
+                def copy(src, destination, **kwargs):
+                    if stage == 'copy' and Path(src) == source / 'pets' / 'feiba-jiubi' / 'spritesheet.webp':
                         raise OSError('copy fault')
-                    return real_copy(source, destination, **kwargs)
-                with patch.object(installer, 'ROOT', root), \
-                     patch.object(installer, 'task_snapshot', return_value=snapshot), \
-                     patch.object(installer, 'stop_service'), \
+                    return real_copy(src, destination, **kwargs)
+                with patch.object(installer, 'ROOT', source), patch.object(manager, 'ROOT', source), \
+                     patch.object(manager, 'default_home', return_value=managed), \
+                     patch.object(manager, 'verify_source'), patch.object(manager, 'user_sid', return_value='test'), \
+                     patch.object(manager, 'prepare_python', return_value=managed/'.venv'/'Scripts'/'python.exe'), \
+                     patch.object(manager, 'register', side_effect=register), patch.object(manager, 'activate', side_effect=activate), \
                      patch.object(installer, 'configure', side_effect=configure), \
-                     patch.object(installer, 'command', side_effect=command), \
                      patch.object(installer.shutil, 'copy2', side_effect=copy), \
+                     patch.object(install_transaction, 'task_snapshot', return_value=snapshot), \
                      patch.object(install_transaction, 'restore_task') as restore:
-                    with self.assertRaisesRegex(RuntimeError, 'rolled back'):
-                        installer.apply_install(SimpleNamespace(skip_pets=False, no_start=False), home,
-                                                root / 'python.exe', '<new-task/>',
-                                                inspection={'reuse':{},'conflicts':[]})
-                    restore.assert_called_once_with(snapshot)
+                    with self.assertRaisesRegex(OSError, 'fault'):
+                        installer.apply_install(SimpleNamespace(skip_pets=False, no_start=False), client, None,
+                                                inspection={'reuse':{}, 'conflicts':[]})
+                    if stage in ('create','run'):
+                        self.assertEqual([call.args[1] for call in restore.call_args_list], [manager.UPDATE_TASK, manager.TASK])
                 for path, expected in before.items():
                     self.assertEqual(path.read_bytes(), expected)
-                self.assertTrue(list((home / 'pet-backups').iterdir()))
+                self.assertFalse((managed/'launcher.py').exists())
 
     def test_new_managed_files_removed_on_failure(self):
         with tempfile.TemporaryDirectory() as folder:

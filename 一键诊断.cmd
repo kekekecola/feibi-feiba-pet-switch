@@ -1,2 +1,4 @@
 @echo off
-"%~dp0.venv\Scripts\pythonw.exe" "%~dp0manager.py" diagnose
+cd /d "%~dp0"
+py -3 manager.py diagnose
+if errorlevel 1 pause

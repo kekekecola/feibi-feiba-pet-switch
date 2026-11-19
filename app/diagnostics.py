@@ -57,7 +57,7 @@ def collect():
     report['status']['native_overlay_form'] = state.get('native_overlay_form')
     # Updater status is intentionally small; never include a raw config.toml or global state.
     report['updater'] = {key:report['updater'].get(key) for key in
-                         ('phase', 'installed_version', 'latest_version', 'last_checked', 'error')}
+                         ('phase', 'installed_version', 'latest_version', 'last_checked', 'error', 'automatic_updates')}
     try:
         report['requested_hotkey'] = settings.load()['hotkey']
     except (OSError, ValueError) as error:

@@ -1,6 +1,6 @@
-"""Versioned local install and opt-in GitHub release updates. No account token is used."""
+"""Versioned local installation and release updates on Codex launch."""
 import argparse
-from datetime import datetime, timedelta
+import csv
 import hashlib
 import json
 import os
@@ -22,10 +22,11 @@ API = 'https://api.github.com/repos/kekekecola/feibi-feiba-pet-switch/releases/l
 TASK = 'FeibiFeibaPetSwitch'
 UPDATE_TASK = TASK + 'Update'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+TASK_NS = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
 
 
 class UpdateLock:
-    def __init__(self, home):
+    def __init__(self, home, wait=0):
         import ctypes
         from ctypes import wintypes
         self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -33,12 +34,17 @@ class UpdateLock:
         self.kernel.CreateMutexW.restype = wintypes.HANDLE
         self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         name = 'Local\\FeibiUpdate_' + hashlib.sha256(str(home.resolve()).casefold().encode()).hexdigest()[:24]
-        self.handle = self.kernel.CreateMutexW(None, False, name)
-        if not self.handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        if ctypes.get_last_error() == 183:
+        deadline = time.monotonic() + wait
+        while True:
+            self.handle = self.kernel.CreateMutexW(None, False, name)
+            if not self.handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if ctypes.get_last_error() != 183:
+                break
             self.kernel.CloseHandle(self.handle)
-            raise RuntimeError('An update is already running')
+            if time.monotonic() >= deadline:
+                raise RuntimeError('An update is already running')
+            time.sleep(.25)
 
     def __enter__(self):
         return self
@@ -71,6 +77,15 @@ def pointer(home):
 
 def environment(home):
     return {**os.environ, 'FEIBI_SWITCH_HOME': str(home), 'FEIBI_SWITCH_DATA_DIR': str(home / 'runtime')}
+
+
+def default_home():
+    return (Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'FeibiFeibaPetSwitch').resolve()
+
+
+def user_sid():
+    result = run(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True, text=True)
+    return next(csv.reader(result.stdout.splitlines()))[1]
 
 
 def status(home, **changes):
@@ -172,11 +187,8 @@ def scheduler_xml(home, python, user_sid, action):
     tree.find('.//' + tag('Arguments')).text = '"' + str(home / 'launcher.py') + '" ' + action
     tree.find('.//' + tag('WorkingDirectory')).text = str(home)
     if action == 'update':
-        trigger = ET.SubElement(tree.find(tag('Triggers')), tag('TimeTrigger'))
-        repetition = ET.SubElement(trigger, tag('Repetition'))
-        ET.SubElement(repetition, tag('Interval')).text = 'PT30M'
-        ET.SubElement(trigger, tag('StartBoundary')).text = (datetime.now() + timedelta(minutes=2)).isoformat(timespec='seconds')
-        ET.SubElement(trigger, tag('Enabled')).text = 'true'
+        # The bridge starts this independent task only on a new Codex session.
+        tree.remove(tree.find(tag('Triggers')))
         tree.find('.//' + tag('ExecutionTimeLimit')).text = 'PT20M'
     ET.register_namespace('', namespace)
     return ET.tostring(tree, encoding='unicode')
@@ -187,6 +199,64 @@ def register(task, xml):
         file = Path(folder) / 'task.xml'
         file.write_text(xml, encoding='utf-16')
         run(['schtasks', '/Create', '/TN', task, '/XML', file, '/F'], capture_output=True)
+
+
+def ensure_updater(home, snapshot=None):
+    """Replace the old timed task with the on-demand updater."""
+    from install_transaction import task_snapshot
+    if (home / 'updates-disabled').is_file():
+        return False
+    current = pointer(home)
+    snapshot = task_snapshot(UPDATE_TASK) if snapshot is None else snapshot
+    if snapshot.get('exists'):
+        tree = ET.fromstring(snapshot['xml'])
+        work = tree.findtext('.//t:Exec/t:WorkingDirectory', namespaces=TASK_NS)
+        argv = tree.findtext('.//t:Exec/t:Arguments', namespaces=TASK_NS, default='')
+        entry = re.fullmatch(r'"([^"]+)"\s+update', argv.strip(), re.IGNORECASE)
+        if (not work or Path(work).resolve() != home.resolve() or not entry
+                or Path(entry[1]).resolve() != (home / 'launcher.py').resolve()):
+            raise RuntimeError('The existing update task belongs to another installation.')
+        triggers = tree.find('t:Triggers', TASK_NS)
+        if triggers is None or len(triggers) == 0:
+            if not snapshot.get('enabled', True):
+                run(['schtasks', '/Change', '/TN', UPDATE_TASK, '/ENABLE'], capture_output=True)
+            return True
+        deadline = time.monotonic() + 15
+        while snapshot.get('running'):
+            if time.monotonic() >= deadline:
+                raise RuntimeError('A previous update is still running.')
+            time.sleep(.5)
+            snapshot = task_snapshot(UPDATE_TASK)
+    register(UPDATE_TASK, scheduler_xml(home, home / current['python'], user_sid(), 'update'))
+    return True
+
+
+def update_on_client_launch(home, session):
+    from install_transaction import task_snapshot
+    if not re.fullmatch(r'\d+:\d+', session):
+        raise ValueError('Invalid Codex session identity')
+    marker = home / 'runtime' / 'auto-update-session.json'
+    snapshot = task_snapshot(UPDATE_TASK)
+    with UpdateLock(home, wait=20):
+        try:
+            previous = json.loads(marker.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            previous = {}
+        if isinstance(previous, dict) and previous.get('session') == session:
+            return
+        if not ensure_updater(home):
+            status(home, automatic_updates=False)
+            return
+        status(home, automatic_updates=True)
+        atomic(marker, {'session': session})
+    # Run outside the service task, so updating can stop the old bridge safely.
+    if not snapshot.get('running'):
+        run(['schtasks', '/Run', '/TN', UPDATE_TASK], capture_output=True)
+
+
+def register_main_task(home):
+    current = pointer(home)
+    register(TASK, scheduler_xml(home, home / current['python'], user_sid(), 'run'))
 
 
 def stop(home, keep_helper=False):
@@ -248,7 +318,7 @@ def recover_pending(home):
     journal.unlink()
 
 
-def activate(home, source, python, previous):
+def activate(home, source, python, previous, start=True):
     new = dict(version=(source / 'VERSION').read_text().strip(), release=str(source.relative_to(home)),
                python=str(python.relative_to(home)))
     atomic(home / 'pending-update.json', dict(previous=previous, new=new))
@@ -256,8 +326,9 @@ def activate(home, source, python, previous):
         stop(home, keep_helper=True)
     atomic(home / 'current.json', new)
     try:
-        run(['schtasks', '/Run', '/TN', TASK], capture_output=True)
-        healthy(home, new['version'])
+        if start:
+            run(['schtasks', '/Run', '/TN', TASK], capture_output=True)
+            healthy(home, new['version'])
     except Exception:
         try:
             stop(home)
@@ -278,7 +349,7 @@ def update(home):
         return update_locked(home)
 
 
-def update_from_folder(home, source):
+def update_from_folder(home, source, start=True):
     """Stage a downloaded release without touching the client's pet library."""
     verify_source(source)
     incoming = (source / 'VERSION').read_text(encoding='utf-8').strip()
@@ -296,7 +367,10 @@ def update_from_folder(home, source):
         status(home, phase='preparing', latest_version=incoming, error=None)
         try:
             python = prepare_python(home, target, current)
-            result = activate(home, target, python, current)
+            if start:
+                result = activate(home, target, python, current)
+            else:
+                result = activate(home, target, python, current, start=False)
         except Exception as error:
             status(home, phase='error', error=str(error))
             raise
@@ -341,49 +415,78 @@ def update_locked(home):
     return result
 
 
-def enable(home, wheelhouse=None, data_from=None):
+def enable(home, wheelhouse=None, data_from=None, *, prepare_runtime=None, start=True):
+    from install import installed_location, stop_service
+    from install_transaction import Transaction, task_snapshot, restore_task
+
     verify_source(ROOT)
-    from install_transaction import task_snapshot, restore_task
-    if (home / 'current.json').exists():
-        raise RuntimeError('Managed install already exists. Use update, not enable again.')
-    snapshots = {name:task_snapshot(name) for name in (TASK, UPDATE_TASK)}
-    if any(snapshot.get('running') for snapshot in snapshots.values()):
-        raise RuntimeError('Exit the existing switch service before enabling managed updates.')
-    target = home / 'versions' / ('v' + (ROOT / 'VERSION').read_text().strip() + '-' + uuid.uuid4().hex[:8])
-    shutil.copytree(ROOT, target, ignore=shutil.ignore_patterns('.git', '.venv', 'runtime', '__pycache__', 'dist', 'managed-link.json'))
-    python = prepare_python(home, target, wheelhouse=wheelhouse)
-    home.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / 'launcher.py', home / 'launcher.py')
-    data = home / 'runtime'
-    data.mkdir(exist_ok=True)
-    old_data = Path(data_from) if data_from else ROOT / 'app' / 'runtime'
-    for name in ('pet-roles.json', 'settings.json', 'hotkey-last-good.json'):
-        if (old_data / name).exists():
-            shutil.copy2(old_data / name, data / name)
-    identity = run(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True, text=True)
-    import csv
-    sid = next(csv.reader(identity.stdout.splitlines()))[1]
-    try:
-        for name, action in ((TASK, 'run'), (UPDATE_TASK, 'update')):
-            register(name, scheduler_xml(home, python, sid, action))
-        result = activate(home, target, python, None)
-    except Exception:
-        for name, snapshot in snapshots.items():
-            restore_task(snapshot, name)
-        (home / 'current.json').unlink(missing_ok=True)
-        (home / 'pending-update.json').unlink(missing_ok=True)
-        raise
-    status(home, phase='enabled', installed_version=result['version'], error=None)
-    atomic(ROOT / 'managed-link.json', {'home':str(home)})
-    return result
+    with UpdateLock(home):
+        snapshots = {name: task_snapshot(name) for name in (TASK, UPDATE_TASK)}
+        mode, old_source = installed_location(snapshots[TASK])
+        if mode == 'managed' or (home / 'current.json').exists():
+            raise RuntimeError('Managed install already exists. Run the program update script.')
+        if snapshots[UPDATE_TASK].get('running'):
+            raise RuntimeError('An existing update is running. Try the installation again when it finishes.')
+        incoming = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
+        if old_source and (old_source / 'VERSION').is_file():
+            old_version = (old_source / 'VERSION').read_text(encoding='utf-8').strip()
+            if version(incoming) < version(old_version):
+                raise RuntimeError('The downloaded installer is older than the installed program.')
+        target = home / 'versions' / ('v' + incoming + '-' + uuid.uuid4().hex[:8])
+        if target.resolve().is_relative_to(ROOT.resolve()):
+            raise ValueError('Installation directory must be outside the source folder.')
+        shutil.copytree(ROOT, target, ignore=shutil.ignore_patterns(
+            '.git', '.venv', 'runtime', '__pycache__', 'dist', 'managed-link.json'))
+        python = prepare_python(home, target, wheelhouse=wheelhouse)
+        sid = user_sid()
+        transaction = Transaction(snapshots[TASK])
+        touched = set()
+        runtime = home / 'runtime'
+        old_data = Path(data_from) if data_from else (old_source or ROOT) / 'app' / 'runtime'
+        try:
+            if snapshots[TASK].get('running'):
+                touched.add(TASK)
+                stop_service(old_source / '.venv' / 'Scripts' / 'python.exe', old_source)
+            runtime.mkdir(parents=True, exist_ok=True)
+            for name in ('pet-roles.json', 'settings.json', 'hotkey-last-good.json'):
+                if (old_data / name).is_file() and (old_data / name).resolve() != (runtime / name).resolve():
+                    transaction.remember(runtime / name)
+                    shutil.copy2(old_data / name, runtime / name)
+            if prepare_runtime:
+                prepare_runtime(runtime, transaction)
+            for path in (home / 'launcher.py', home / 'current.json', home / 'pending-update.json', ROOT / 'managed-link.json'):
+                transaction.remember(path)
+            shutil.copy2(ROOT / 'launcher.py', home / 'launcher.py')
+            for name, action in ((TASK, 'run'), (UPDATE_TASK, 'update')):
+                touched.add(name)
+                register(name, scheduler_xml(home, python, sid, action))
+            result = activate(home, target, python, None, start=start)
+            atomic(ROOT / 'managed-link.json', {'home': str(home)})
+        except Exception:
+            try:
+                if (home / 'current.json').is_file():
+                    stop(home)
+            finally:
+                try:
+                    transaction.rollback()
+                finally:
+                    for name in (UPDATE_TASK, TASK):
+                        if name in touched:
+                            restore_task(snapshots[name], name)
+            raise
+        status(home, phase='enabled', installed_version=result['version'], automatic_updates=True, error=None)
+        return result
 
 
-def disable_updater():
+def disable_updater(home=None):
     from install_transaction import task_snapshot
     if task_snapshot(UPDATE_TASK).get('running'):
         run(['schtasks', '/End', '/TN', UPDATE_TASK], capture_output=True)
     if task_snapshot(UPDATE_TASK)['exists']:
         run(['schtasks', '/Delete', '/TN', UPDATE_TASK, '/F'], capture_output=True)
+    if home and (home / 'current.json').is_file():
+        (home / 'updates-disabled').touch()
+        status(home, automatic_updates=False)
 
 
 def relay_client(command, env=None):
@@ -397,7 +500,7 @@ def relay_client(command, env=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('enable','update','run','control','diagnose','settings','stop','disable-updates'))
+    parser.add_argument('action', choices=('enable','update','update-on-client-launch','run','control','diagnose','settings','stop','disable-updates'))
     parser.add_argument('command', nargs='?', default='status')
     parser.add_argument('--home', type=Path)
     parser.add_argument('--timeout', type=float, default=25)
@@ -408,14 +511,19 @@ def main():
         try:
             args.home = Path(json.loads((ROOT / 'managed-link.json').read_text(encoding='utf-8'))['home'])
         except (OSError, ValueError, KeyError):
-            args.home = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'FeibiFeibaPetSwitch'
+            args.home = default_home()
     home = args.home.resolve()
     if not (home / 'current.json').exists() and args.action in ('stop','control','diagnose','settings'):
         script, extra = {'stop':('bridge_control.py',['quit']), 'control':('bridge_control.py',[args.command, '--timeout', str(args.timeout)]),
                          'diagnose':('diagnostics.py',['--gui']), 'settings':('settings.py',['--gui'])}[args.action]
         raise SystemExit(relay_client([sys.executable, str(ROOT / 'app' / script), *extra]))
     if args.action == 'enable':
-        print(json.dumps(enable(home, args.wheelhouse, args.data_from), ensure_ascii=False))
+        if (home / 'current.json').exists():
+            (home / 'updates-disabled').unlink(missing_ok=True)
+            status(home, automatic_updates=ensure_updater(home))
+            print(json.dumps(pointer(home), ensure_ascii=False))
+        else:
+            print(json.dumps(enable(home, args.wheelhouse, args.data_from), ensure_ascii=False))
     elif args.action == 'update':
         try:
             print(json.dumps(update(home), ensure_ascii=False))
@@ -423,7 +531,9 @@ def main():
             status(home, phase='error', error=str(error))
             raise
     elif args.action == 'disable-updates':
-        disable_updater()
+        disable_updater(home)
+    elif args.action == 'update-on-client-launch':
+        update_on_client_launch(home, args.command)
     elif args.action == 'stop':
         stop(home)
     else:

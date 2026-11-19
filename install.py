@@ -1,6 +1,5 @@
 """Current-user Windows installation; never launches the desktop client itself."""
 import argparse
-import csv
 from datetime import datetime
 import hashlib
 import json
@@ -10,11 +9,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
-import venv
 import time
 import xml.etree.ElementTree as ET
-from install_transaction import Transaction, task_snapshot
+from install_transaction import task_snapshot
 from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parent
@@ -66,10 +63,13 @@ def install_pets(home, transaction=None, reuse=None):
             shutil.copy2(source / name, target / name)
 
 
-def configure(args):
+def configure(args, role_file=None):
     sys.path.insert(0, str(ROOT / 'app'))
     import pet_registry
-    roles = pet_registry.load()
+    if role_file is None:
+        roles = pet_registry.load()
+    else:
+        roles = json.loads((role_file if role_file.is_file() else pet_registry.DEFAULT_ROLES).read_text(encoding='utf-8'))
     for form in ('feibi', 'feiba'):
         value = getattr(args, form + '_id')
         if value:
@@ -79,7 +79,11 @@ def configure(args):
             roles[form].pop('fingerprint', None)
     if roles['feibi']['id'] == roles['feiba']['id']:
         raise ValueError('The two forms must have different IDs')
-    pet_registry.save(roles)
+    if role_file is None:
+        pet_registry.save(roles)
+    else:
+        from manager import atomic
+        atomic(role_file, roles)
 
 
 def task_xml(pythonw, user_sid):
@@ -146,57 +150,24 @@ def installed_location(snapshot):
     raise RuntimeError('无法识别已注册的菲比程序位置，已停止以保留现有宠物和配置。')
 
 
-def apply_install(args, home, python, xml, *, snapshot=None, previous_root=None, inspection=None):
+def apply_install(args, client_home, previous_root, inspection=None):
+    from manager import default_home, enable
     from pet_install_guard import inspect
-    if inspection is None:
-        inspection = inspect(home) if not args.skip_pets else {'reuse': {}, 'conflicts': []}
-    if inspection['conflicts']:
-        raise RuntimeError('\n'.join(inspection['conflicts']))
-    transaction = Transaction(task_snapshot() if snapshot is None else snapshot)
-    runtime = ROOT / 'app' / 'runtime'
-    try:
-        if transaction.snapshot.get('running'):
-            transaction.task_touched = True
-            if previous_root is None:
-                stop_service(python)
-            else:
-                stop_service(previous_root / '.venv' / 'Scripts' / 'python.exe', previous_root)
-        if previous_root is not None and previous_root != ROOT:
-            old_runtime = previous_root / 'app' / 'runtime'
-            for name in ('pet-roles.json', 'settings.json', 'hotkey-last-good.json'):
-                source = old_runtime / name
-                if source.is_file():
-                    target = runtime / name
-                    transaction.remember(target)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target)
+
+    if not args.skip_pets:
+        inspection = inspection if inspection is not None else inspect(client_home)
+        if inspection['conflicts']:
+            raise RuntimeError('\n'.join(inspection['conflicts']))
+
+    def prepare_runtime(runtime, transaction):
         if not args.skip_pets:
-            install_pets(home, transaction, inspection['reuse'])
-            for form, identifier in inspection['reuse'].items():
-                if not getattr(args, form + '_id', None):
-                    setattr(args, form + '_id', identifier)
+            install_pets(client_home, transaction, inspection['reuse'])
         if previous_root is None or args.feibi_id or args.feiba_id:
-            transaction.remember(runtime / 'pet-roles.json')
-            configure(args)
-        with tempfile.TemporaryDirectory(prefix='feibi-task-') as folder:
-            task_file = Path(folder) / 'task.xml'
-            task_file.write_text(xml, encoding='utf-16')
-            transaction.task_touched = True
-            command(['schtasks', '/Create', '/TN', TASK, '/XML', task_file, '/F'])
-        if not args.no_start:
-            command(['schtasks', '/Run', '/TN', TASK])
-    except Exception as original:
-        try:
-            # A failed start may still have launched the new service.
-            if transaction.task_touched:
-                stop_service(python)
-        except Exception:
-            pass
-        try:
-            transaction.rollback()
-        except Exception as recovery_error:
-            raise RuntimeError(str(original) + '; ' + str(recovery_error)) from original
-        raise RuntimeError(str(original) + '; managed files and scheduled task rolled back.') from original
+            role_file = runtime / 'pet-roles.json'
+            transaction.remember(role_file)
+            configure(args, role_file)
+
+    return enable(default_home(), prepare_runtime=prepare_runtime, start=not args.no_start)
 
 
 def main():
@@ -204,6 +175,7 @@ def main():
     parser.add_argument('action', choices=('install', 'update', 'uninstall', 'configure', 'verify', 'check-pets'))
     parser.add_argument('--skip-pets', action='store_true', help='Use an existing pair instead of installing local copies')
     parser.add_argument('--no-start', action='store_true', help='Register logon task without starting now')
+    parser.add_argument('--enable-auto-updates', action='store_true', help='Resume automatic updates after opting out')
     parser.add_argument('--dry-run', action='store_true', help='Validate assets and show plan without modifying this machine')
     parser.add_argument('--feibi-id')
     parser.add_argument('--feiba-id')
@@ -223,8 +195,11 @@ def main():
     snapshot = None
     inspection = None
     if args.action in ('install', 'update') and os.name == 'nt':
+        from manager import default_home
         snapshot = task_snapshot()
         mode, previous_root = installed_location(snapshot)
+        if not snapshot.get('exists') and (default_home() / 'current.json').is_file():
+            mode, previous_root = 'managed', default_home()
         updating = updating or mode is not None
     if updating and previous_root is None and not args.dry_run:
         raise RuntimeError('未找到已安装的切换程序。已有两只宠物时，请用 install --skip-pets 和已有 ID 完成首次程序安装。')
@@ -242,7 +217,7 @@ def main():
             raise RuntimeError('已检测到一只现有宠物。请确认两只宠物的 ID 后使用 install --skip-pets，避免重新导入。')
     if args.dry_run:
         print(json.dumps(dict(action='update' if updating else args.action, task=TASK, pets_destination=None if args.skip_pets else str(home / 'pets'),
-                              python_environment=str(ROOT / '.venv'), skip_pets=args.skip_pets), ensure_ascii=False))
+                              skip_pets=args.skip_pets, automatic_updates='once_per_codex_launch'), ensure_ascii=False))
         return
     if os.name != 'nt' or sys.version_info < (3, 11):
         raise RuntimeError('Windows and Python 3.11+ are required.')
@@ -251,34 +226,32 @@ def main():
         uninstall(python)
         return
     if args.action == 'configure':
-        configure(args)
+        configured_mode, location = installed_location(task_snapshot())
+        configure(args, location / 'runtime' / 'pet-roles.json' if configured_mode == 'managed' else None)
         print('Role mapping saved. Restart the F8 service to load it.')
         return
     if mode == 'managed':
-        from manager import update_from_folder
-        result = update_from_folder(previous_root, ROOT)
+        from manager import UpdateLock, ensure_updater, pointer, register_main_task, status, update_from_folder
+        restore_main = not snapshot.get('exists')
+        if restore_main:
+            old_version = pointer(previous_root)['version']
+            register_main_task(previous_root)
+        result = (update_from_folder(previous_root, ROOT, start=False) if args.no_start
+                  else update_from_folder(previous_root, ROOT))
+        if restore_main and not args.no_start and result['version'] == old_version:
+            command(['schtasks', '/Run', '/TN', TASK], timeout=30)
+        with UpdateLock(previous_root, wait=20):
+            if args.enable_auto_updates:
+                (previous_root / 'updates-disabled').unlink(missing_ok=True)
+            status(previous_root, automatic_updates=ensure_updater(previous_root))
         print('Switcher version ' + result['version'] + '. Your existing pets are preserved.')
         return
-    if mode == 'legacy' and (previous_root / 'VERSION').is_file():
-        from manager import version
-        previous_version = (previous_root / 'VERSION').read_text(encoding='utf-8').strip()
-        if version((ROOT / 'VERSION').read_text(encoding='utf-8').strip()) <= version(previous_version):
-            print('Switcher version ' + previous_version + ' is already installed. Your existing pets are preserved.')
-            return
-    import tkinter  # Fail early if Python was installed without Tcl/Tk.
-    if not python.exists():
-        venv.EnvBuilder(with_pip=True).create(ROOT / '.venv')
-    command([python, '-m', 'pip', 'install', '-r', ROOT / 'requirements.txt'])
-    command([python, '-c', 'import PIL, uiautomation, comtypes, tkinter'])
-    identity = command(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True, text=True)
-    sid = next(csv.reader(identity.stdout.splitlines()))[1]
-    xml = task_xml(python.with_name('pythonw.exe'), sid)
-    apply_install(args, home, python, xml, snapshot=snapshot, previous_root=previous_root, inspection=inspection)
+    apply_install(args, home, previous_root, inspection)
     if args.skip_pets:
         print('Program installed. Keep using your existing pets and press F8 to switch.')
     else:
         print('First-time installation complete. Refresh Pets in Codex and select either pet to use F8.')
-    print('Keep this folder in place. The task starts only the F8 helper, never the desktop client.')
+    print('Automatic updates check once when you open Codex.')
 
 
 if __name__ == '__main__':

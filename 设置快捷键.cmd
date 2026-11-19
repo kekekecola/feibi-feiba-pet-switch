@@ -1,2 +1,4 @@
 @echo off
-"%~dp0.venv\Scripts\pythonw.exe" "%~dp0manager.py" settings
+cd /d "%~dp0"
+py -3 manager.py settings
+if errorlevel 1 pause

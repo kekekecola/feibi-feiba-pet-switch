@@ -22,30 +22,47 @@ class PetInstallGuardTests(unittest.TestCase):
             with patch.object(sys, 'argv', ['install.py', 'install']), \
                  patch.object(install, 'task_snapshot', return_value=snapshot), \
                  patch('pet_install_guard.inspect', side_effect=AssertionError('unexpected pet inspection')), \
-                 patch.object(manager, 'update_from_folder', return_value={'version': '1.6.9'}) as update:
+                 patch.object(manager, 'update_from_folder', return_value={'version': '1.6.9'}) as update, \
+                 patch.object(manager, 'ensure_updater', return_value=True) as ensure:
                 install.main()
                 update.assert_called_once_with(managed, install.ROOT)
+                ensure.assert_called_once_with(managed)
 
     def test_legacy_update_preserves_pets_and_migrates_runtime_preferences(self):
         with tempfile.TemporaryDirectory() as folder:
-            base = Path(folder)
+            base = Path(folder).resolve()
             previous = base/'old'
-            source = base/'new'
+            managed = base/'managed'
             config = previous/'app'/'runtime'
             config.mkdir(parents=True)
             (config/'pet-roles.json').write_text('existing mapping', encoding='utf-8')
             (config/'settings.json').write_text('existing settings', encoding='utf-8')
             args = SimpleNamespace(skip_pets=True, feibi_id=None, feiba_id=None, no_start=False)
-            with patch.object(install, 'ROOT', source), patch.object(install, 'command'), \
+            previous_task = {'exists':True,'running':True,
+                'xml': install.task_xml(previous/'.venv'/'Scripts'/'pythonw.exe', 'test').replace(
+                    str(install.ROOT / 'app'), str(previous / 'app'))}
+            original_atomic = manager.atomic
+            def safe_atomic(path, data):
+                if path != manager.ROOT / 'managed-link.json':
+                    original_atomic(path, data)
+            with patch.object(manager, 'default_home', return_value=managed), \
+                 patch('install_transaction.task_snapshot', side_effect=[previous_task, {'exists':False}]), \
+                 patch.object(manager, 'prepare_python', return_value=managed/'.venv'/'Scripts'/'python.exe'), \
+                 patch.object(manager, 'user_sid', return_value='test'), \
+                 patch.object(manager, 'register') as register, \
+                 patch.object(manager, 'activate', return_value={'version':'1.6.14'}), \
                  patch.object(install, 'stop_service') as stop, patch.object(install, 'configure') as configure, \
-                 patch.object(install, 'install_pets') as install_pets:
-                install.apply_install(args, base/'client', source/'python.exe', '<task/>',
-                                      snapshot={'exists':True,'running':True}, previous_root=previous)
+                 patch.object(install, 'install_pets') as install_pets, \
+                 patch.object(manager, 'atomic', side_effect=safe_atomic):
+                install.apply_install(args, base/'client', previous)
                 stop.assert_called_once_with(previous/'.venv'/'Scripts'/'python.exe', previous)
                 configure.assert_not_called()
                 install_pets.assert_not_called()
-            self.assertEqual((source/'app'/'runtime'/'settings.json').read_text(), 'existing settings')
-            self.assertEqual((source/'app'/'runtime'/'pet-roles.json').read_text(), 'existing mapping')
+                updater_task = register.call_args_list[1].args
+                self.assertEqual(updater_task[0], manager.UPDATE_TASK)
+                self.assertNotIn('Trigger', updater_task[1])
+            self.assertEqual((managed/'runtime'/'settings.json').read_text(), 'existing settings')
+            self.assertEqual((managed/'runtime'/'pet-roles.json').read_text(), 'existing mapping')
 
     def test_valid_local_pair_is_detected_for_reuse(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -91,7 +108,7 @@ class PetInstallGuardTests(unittest.TestCase):
             self.assertTrue(result['conflicts'])
             with patch.object(install,'task_snapshot') as snapshot:
                 with self.assertRaises(RuntimeError):
-                    install.apply_install(SimpleNamespace(skip_pets=False),home,home/'python.exe','')
+                    install.apply_install(SimpleNamespace(skip_pets=False), home, None)
                 snapshot.assert_not_called()
             self.assertTrue((duplicate/'pet.json').exists())
 
