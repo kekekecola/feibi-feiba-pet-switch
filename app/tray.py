@@ -18,8 +18,19 @@ def status_label(state):
     if state.get('hotkey_error') or state.get('settings_error'):
         return '快捷键异常'
     phase = state.get('phase')
-    return {'idle':'就绪', 'preparing':'准备切换', 'transition':'正在切换', 'restoring':'恢复原生',
-            'reconnecting':'重新连接', 'waiting_gpt':'等待客户端', 'error':'切换失败', 'stopped':'已退出'}.get(phase, '准备中')
+    if phase == 'idle':
+        if pet_ready(state):
+            return '可以切换' if state.get('hotkey_registered') else '快捷键未注册'
+        return '等待显示宠物' if state.get('connection_state') == 'ready' else '准备连接'
+    return {'preparing':'检查宠物卡片', 'selecting_native':'确认原生宠物', 'transition':'正在切换',
+            'restoring':'恢复原生', 'recovering_native':'恢复原生',
+            'reconnecting':'正在连接', 'waiting_gpt':'等待 Codex 启动', 'waiting_window':'等待打开 Codex',
+            'error':'连接或切换失败', 'stopped':'已退出'}.get(phase, '准备连接')
+
+
+def pet_ready(state):
+    return (bool(state.get('running')) and state.get('connection_state') == 'ready'
+            and state.get('form') in ('feibi', 'feiba'))
 
 
 class Tray:

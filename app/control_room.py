@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 from paths import RUNTIME as DATA, VERSION
 import settings
 import diagnostics
+import tray
 W, H = 1040, 700
 C = dict(ink='#45405E', muted='#746B84', accent='#7865AE', light='#EDE6FA', border='#E9E1F2', cream='#FFFCF7', green='#5C9B85')
 
@@ -306,9 +307,9 @@ class ControlRoom:
             self.c.tag_bind(item,'<Enter>',lambda _:self.c.configure(cursor='hand2'))
             self.c.tag_bind(item,'<Leave>',lambda _:self.c.configure(cursor=''))
         state=read('bridge-status.json')
-        key=state.get('hotkey','F8')
         self.round(788,28,158,33,16,'#F5F8F2','#E4ECDD')
-        self.text(867,44,'●  '+key+' 已就绪' if state.get('hotkey_registered') else '●  等待连接',14,C['green'],anchor='center')
+        self.connection_badge = self.text(867,44,'',14,anchor='center')
+        self.update_connection_badge(state)
         self.text(234,655,'菲比的陪伴控制室  ·  关闭窗口后快捷键仍可用',14,C['muted'])
         if self.tab==0:
             self.hotkey_page()
@@ -350,7 +351,7 @@ class ControlRoom:
         elif state.get('hotkey_error'):
             message=state['hotkey_error']
         elif state.get('hotkey')==requested and state.get('hotkey_registered'):
-            message='已生效：'+requested+'。现在就可以试试换装啦。'
+            message = requested + ' 已注册。' + ('可以切换宠物。' if state.get('switch_ready') else '等待宠物后台连接。')
         else:
             message='后台尚未确认，请查看状态与诊断。'
         self.feedback=message[:100]
@@ -378,26 +379,42 @@ class ControlRoom:
     def status_page(self):
         self.heading('陪伴，正在进行中','把小小的运行状态，整理得一目了然。')
         state=read('bridge-status.json')
-        ready=state.get('connection_state')=='ready'
+        ready=state.get('switch_ready',False)
         self.card(232,204,426,112)
         self.round(255,232,45,45,18,'#EDF5EF')
-        self.text(278,255,'✓',25,C['green'],anchor='center',latin=True)
-        self.text(318,230,'伙伴已就位' if ready else '伙伴连接中',25,bold=True)
-        if state.get('last_switch_failure'):
+        self.text(278,255,'✓' if ready else '·',25,C['green'] if ready else C['muted'],anchor='center',latin=True)
+        self.text(318,230,tray.status_label(state),25,bold=True)
+        if state.get('pending_switch'):
+            self.text(318,271,'本次请求正在等待连接',15,C['muted'])
+        elif state.get('pending_switch_notice'):
+            self.text(318,271,state['pending_switch_notice'],15,C['muted'],width=310)
+        elif state.get('last_switch_failure'):
             self.text(318,271,'上次切换未完成，可查看诊断详情',15,'#9A5760')
         else:
             self.text(318,271,'原生宠物  ·  自适应大小',15,C['muted'])
         self.card(232,338,426,220)
         names={'feibi':'菲比啾比 · 戴帽','feiba':'菲八啾比 · 摘帽'}
-        rows=[('当前形态',names.get(state.get('form'),'等待识别')),('切换快捷键',state.get('hotkey','F8')),
+        key_status = state.get('hotkey','F8') + (' 已注册' if state.get('hotkey_registered') else ' 未注册')
+        rows=[('当前形态',names.get(state.get('form'),'等待识别')),('切换快捷键',key_status),
               ('后台服务','运行中' if state.get('running') else '未运行'),('程序版本','v'+state.get('version','1.5.1'))]
         for i,(label,value) in enumerate(rows):
             y=365+i*48
             self.text(255,y,label,18,C['muted']);self.text(632,y,value,19,anchor='ne')
             if i<3:self.c.create_line(255,y+34,633,y+34,fill='#F0EAF5')
         self.button(232,582,170,43,'刷新状态',self.draw)
-        target='put-on' if state.get('form')=='feiba' else 'take-off'
-        self.button(416,582,242,43,'切换中…' if self.busy else ('戴帽 · 菲比' if target=='put-on' else '摘帽 · 菲八'),lambda:self.switch(target),primary=True)
+        target = {'feibi':'take-off','feiba':'put-on'}.get(state.get('form'), 'toggle')
+        action_label = '戴帽 · 菲比' if target == 'put-on' else '摘帽 · 菲八'
+        if not ready:
+            action_label = '连接后切换'
+        if state.get('pending_switch'):
+            action_label = '等待连接…'
+        self.button(416,582,242,43,'切换中…' if self.busy else action_label,lambda:self.switch(target),primary=True)
+
+    def update_connection_badge(self, state):
+        ready = state.get('switch_ready') and state.get('hotkey_registered') and not state.get('hotkey_error')
+        text = state.get('hotkey','F8') + ' 可切换' if ready else tray.status_label(state)
+        self.c.itemconfigure(self.connection_badge, text='●  '+text,
+                             fill=C['green'] if ready else C['muted'])
 
     def update_page(self):
         self.heading('让陪伴顺顺利利','更新与诊断，都在这里安心查看。')
@@ -561,9 +578,12 @@ class ControlRoom:
                 self.detail=False
                 self.draw()
             self.show()
+        if self.root.state() != 'withdrawn':
+            self.update_connection_badge(state)
         if self.root.state()!='withdrawn' and self.tab!=0 and not self.detail and not self.busy and not self.resizing:
             state=read('bridge-status.json');updater=read('update-status.json')
-            snapshot=tuple(state.get(k) for k in ('phase','form','hotkey','version','error','last_switch_failure'))+tuple(updater.get(k) for k in ('phase','installed_version','latest_version','error'))
+            snapshot=tuple(state.get(k) for k in ('phase','form','hotkey','version','error','last_switch_failure',
+                'hotkey_registered','hotkey_error','connection_state','switch_ready','pending_switch','pending_switch_notice'))+tuple(updater.get(k) for k in ('phase','installed_version','latest_version','error'))
             if snapshot!=self.last_snapshot:
                 self.last_snapshot=snapshot
                 self.draw()

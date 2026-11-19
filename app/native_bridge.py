@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import heapq
 import ctypes
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -32,6 +33,15 @@ STATUS = RUNTIME / "bridge-status.json"
 SHUTDOWN_ACTIONS = {"quit", "quit-for-update"}
 ACTIONS = {"toggle", "take-off", "put-on"} | SHUTDOWN_ACTIONS
 PENDING_RESTORE = []
+SWITCH_QUEUE_SECONDS = 12
+
+
+@dataclass(frozen=True)
+class PendingSwitch:
+    action: str
+    command_id: str | None
+    selected_id: str
+    deadline: float
 
 
 def trace_focus(stage):
@@ -334,9 +344,11 @@ class Bridge:
         self.room_processes = []
         self.room_open_nonce = None
         self.next_reconnect = 0
+        self.next_manual_reconnect = 0
         self.next_health_check = 0
         self.next_maintenance = 0
-        self.state = {"running": True, "pid": os.getpid(), "phase": "idle",
+        self.state = {"running": True, "pid": os.getpid(), "phase": "starting",
+                      "connection_state": "starting", "pending_switch": False,
                       "native_bridge_configured": True, "native_switch_confirmed": False,
                       "background_selection": True,
                       "hotkey": "F8", "hotkey_registered": False, "cg_visible": False}
@@ -360,6 +372,7 @@ class Bridge:
     def update(self, **changes):
         with self.lock:
             self.state.update(changes)
+            self.state['switch_ready'] = tray.pet_ready(self.state) and self.state.get('phase') == 'idle'
             if getattr(self, "tray", None):
                 self.state["tray_registered"] = self.tray.registered
                 self.state["tray_icon_custom"] = self.tray.icon_loaded
@@ -439,15 +452,66 @@ class Bridge:
                 self.close()
             return
         with self.lock:
-            if self.busy or self.closing:
-                if not self.closing and self.state.get("phase") == "reconnecting" and self.pending_request is None:
-                    self.pending_request = (action, command_id)
-                    return
+            connecting = self.state.get('connection_state') != 'ready'
+            if self.closing or self.pending_request or (self.busy and self.state.get('phase') != 'reconnecting'):
                 self.ack(command_id, "ignored_busy", "当前过渡尚未结束。")
                 return
+            if connecting:
+                self.queue_switch(action, command_id)
+                return
             self.busy = True
-            self.update(phase="preparing", native_switch_confirmed=False)
+            self.update(phase="preparing", native_switch_confirmed=False, pending_switch_notice=None)
         threading.Thread(target=self.worker, args=(action, command_id), daemon=True).start()
+
+    def queue_switch(self, action, command_id):
+        now = time.monotonic()
+        try:
+            selected_id = native.preferences().get('selected-avatar-id')
+        except (OSError, ValueError):
+            selected_id = None
+        if selected_id:
+            self.pending_request = PendingSwitch(action, command_id, selected_id, now + SWITCH_QUEUE_SECONDS)
+            self.update(pending_switch=True, pending_switch_notice=None)
+        else:
+            message = '请先在 Codex 显示一只已绑定的宠物，再按快捷键。'
+            self.update(pending_switch_notice=message)
+            self.ack(command_id, 'cancelled', message)
+        if not self.busy and now >= self.next_manual_reconnect:
+            # A user request may shorten error backoff, with its own rate limit.
+            self.next_manual_reconnect = now + 3
+            self.next_reconnect = 0
+            self.root.after(0, self.reconnect_if_needed)
+
+    def cancel_pending_switch(self, message):
+        pending = self.pending_request
+        if pending is not None:
+            self.pending_request = None
+            self.update(pending_switch=False, pending_switch_notice=message)
+            self.ack(pending.command_id, 'cancelled', message)
+
+    def dispatch_pending_switch(self):
+        with self.lock:
+            pending = self.pending_request
+            if pending is None or self.closing:
+                return
+            if time.monotonic() >= pending.deadline:
+                self.cancel_pending_switch('等待连接超时，就绪后可再按一次快捷键。')
+                return
+            if self.busy or self.state.get('connection_state') != 'ready':
+                return
+            try:
+                selected_id = native.preferences().get('selected-avatar-id')
+            except (OSError, ValueError):
+                selected_id = None
+            if selected_id != pending.selected_id or not tray.pet_ready(self.state):
+                self.cancel_pending_switch('等待期间宠物选择有变化，请重新按快捷键。')
+                return
+            self.pending_request = None
+            self.update(pending_switch=False, pending_switch_notice=None)
+            action = pending.action
+            if action == 'toggle':
+                action = 'take-off' if self.state['form'] == 'feibi' else 'put-on'
+            self.request(action, pending.command_id)
 
     def worker(self, action, command_id):
         try:
@@ -492,11 +556,18 @@ class Bridge:
                 logging.exception('Isolated worker recovery failed; heartbeat will retry')
             self.reconnect_failures = getattr(self, 'reconnect_failures', 0) + 1
             self.next_reconnect = time.monotonic() + min(60, 8 * 2 ** min(self.reconnect_failures - 1, 3))
+            try:
+                current_form = native.selected_form(refresh=False)
+            except (OSError, ValueError):
+                current_form = None
             self.update(phase="error", connection_state="disconnected", target_form=None, error=str(error),
                         native_switch_confirmed=False,
-                        control_details=getattr(error,"details",None), form=native.selected_form(),
+                        control_details=getattr(error,"details",None), form=current_form,
                         native_visible=None, cg_visible=cg_visible(), **failure)
             self.ack(command_id, "failed", str(error))
+            if not action:
+                with self.lock:
+                    self.cancel_pending_switch('后台连接未完成，详情见诊断。')
         finally:
             path = self.progress_path
             self.progress_path = None
@@ -509,10 +580,6 @@ class Bridge:
                 logging.exception('Progress file cleanup deferred')
             with self.lock:
                 self.busy = False
-                pending = self.pending_request
-                self.pending_request = None
-            if pending:
-                self.hotkey_events.put(pending)
 
     def reconnect_if_needed(self):
         if self.closing or self.busy or time.monotonic() < self.next_reconnect:
@@ -530,16 +597,19 @@ class Bridge:
             if (self.state.get("connection_state") == "ready"
                     and background.owned_window() and control.status().get("running")):
                 return
-            self.update(connection_state="disconnected", native_switch_confirmed=False)
             # Keep F8 alive while GPT is closed; initialize only after a primary window exists.
             try:
-                native.Windows().main()
+                windows = native.Windows()
+                main_window = windows.main()
             except RuntimeError:
-                self.update(phase="waiting_gpt", connection_state="waiting_gpt")
+                self.update(phase="waiting_gpt", connection_state="waiting_gpt", native_switch_confirmed=False, error=None)
+                return
+            if not background.owned_window() and windows.user32.IsIconic(main_window.hwnd):
+                self.update(phase='waiting_window', connection_state='waiting_window', native_switch_confirmed=False, error=None)
                 return
             with self.lock:
                 self.busy = True
-                self.update(phase="reconnecting", connection_state="reconnecting")
+                self.update(phase="reconnecting", connection_state="reconnecting", native_switch_confirmed=False, error=None)
             threading.Thread(target=self.worker, args=(None, None), daemon=True).start()
         except Exception as error:
             logging.exception("Connection check failed")
@@ -596,6 +666,7 @@ class Bridge:
             elif len(path.stem) == 32 and all(c in '0123456789abcdef' for c in path.stem):
                 self.ack(path.stem, 'failed', '无效命令数据，未执行。')
             path.unlink(missing_ok=True)
+        self.dispatch_pending_switch()
 
     def heartbeat(self):
         if not self.closing:
@@ -611,8 +682,8 @@ class Bridge:
                 if not self.busy:
                     if time.monotonic() >= self.next_maintenance:
                         active = set(self.request_meta)
-                        if self.pending_request and self.pending_request[1]:
-                            active.add(self.pending_request[1])
+                        if self.pending_request and self.pending_request.command_id:
+                            active.add(self.pending_request.command_id)
                         maintenance.cleanup(RUNTIME, active)
                         self.next_maintenance = time.monotonic() + 3600
                     if recovery_journal.JOURNAL.exists():
@@ -620,9 +691,12 @@ class Bridge:
                         recovery_journal.recover(cg_visible())
                     recover_native_visibility()
                     background.release_helper_focus()
-                    prefs = native.preferences()
-                    self.update(form=native.selected_form(refresh=False), selected_id=prefs.get("selected-avatar-id"),
-                                native_pet_size_px=prefs.get("avatar-overlay-mascot-width-px", 112))
+                    try:
+                        prefs = native.preferences()
+                        self.update(form=native.selected_form(refresh=False), selected_id=prefs.get("selected-avatar-id"),
+                                    native_pet_size_px=prefs.get("avatar-overlay-mascot-width-px", 112))
+                    except (OSError, ValueError):
+                        self.update(form=None, selected_id=None)
                     self.reconnect_if_needed()
                 else:
                     with self.lock:
@@ -652,9 +726,7 @@ class Bridge:
                                    creationflags=subprocess.CREATE_NO_WINDOW)
                 except Exception:
                     logging.exception("CG quit did not complete")
-            if self.pending_request:
-                self.ack(self.pending_request[1], "cancelled", "联动已关闭，排队请求已取消。")
-                self.pending_request = None
+            self.cancel_pending_switch("联动已关闭，排队请求已取消。")
             self.update(running=False, phase="stopped", hotkey_registered=False)
             self.ack(getattr(self, "quit_command", None), "completed", "F8 原生切换器已退出。")
         finally:
@@ -693,7 +765,7 @@ def main():
                     def report(**data):
                         path = RUNTIME / ('progress-'+token+'.json')
                         write_json(path, control.read_json(path) | data | {'token':token})
-                    result = transition(action,report) if action else {}
+                    result = transition(action, report) if action else {'form': native.selected_form(refresh=False)}
                     print(json.dumps(dict(job=request['job'],result=result),ensure_ascii=False),flush=True)
                 except Exception as error:
                     logging.exception('Warm worker request failed')
