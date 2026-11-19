@@ -25,6 +25,7 @@ def status_label(state):
     return {'preparing':'检查宠物卡片', 'selecting_native':'确认原生宠物', 'transition':'正在切换',
             'restoring':'恢复原生', 'recovering_native':'恢复原生',
             'reconnecting':'正在连接', 'waiting_gpt':'等待 Codex 启动', 'waiting_window':'等待打开 Codex',
+            'sleeping':'省内存待机', 'releasing_helper':'释放辅助窗口',
             'error':'连接或切换失败', 'stopped':'已退出'}.get(phase, '准备连接')
 
 

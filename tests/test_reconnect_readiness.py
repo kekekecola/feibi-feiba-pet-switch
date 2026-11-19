@@ -21,6 +21,8 @@ class ReconnectReadinessTests(unittest.TestCase):
         service.next_reconnect = 100
         service.next_manual_reconnect = 0
         service.next_health_check = 0
+        service.last_activity = 0
+        service.pool = Mock()
         service.state = dict(running=True, form='feiba', phase='error',
                              connection_state='disconnected', hotkey_registered=True)
         service.update = Mock(side_effect=service.state.update)
@@ -88,3 +90,35 @@ class ReconnectReadinessTests(unittest.TestCase):
                 service.request.assert_not_called()
                 self.assertIsNone(service.pending_request)
                 self.assertEqual(service.ack.call_args.args[:2], ('command','cancelled'))
+
+    def test_memory_saving_releases_only_when_idle_and_dormant_does_not_reconnect(self):
+        service = self.service()
+        service.state.update(connection_state='ready', phase='idle', memory_saving=True)
+        service.next_reconnect = 0
+        with patch.object(bridge.time, 'monotonic', return_value=301), \
+             patch.object(bridge.recovery_journal, 'JOURNAL') as journal, \
+             patch.object(bridge.threading, 'Thread') as thread, \
+             patch.object(bridge.background, 'close') as close, \
+             patch.object(bridge.background, 'owned_window', return_value=None), \
+             patch.object(bridge.native, 'Windows') as windows:
+            journal.exists.return_value = False
+            service.busy = True
+            self.assertFalse(service.maybe_release_idle_helper())
+            service.busy = False
+            self.assertTrue(service.maybe_release_idle_helper())
+            thread.return_value.start.assert_called_once()
+            service.release_idle_helper()
+            close.assert_called_once()
+            service.pool.close.assert_called_once()
+            self.assertEqual(service.state['connection_state'], 'sleeping')
+            service.reconnect_if_needed()
+            windows.assert_not_called()
+
+    def test_sleeping_mode_honors_one_wakeup_with_a_bounded_deadline(self):
+        service = self.service()
+        service.state.update(connection_state='sleeping', phase='sleeping', memory_saving=True)
+        with patch.object(bridge.time, 'monotonic', return_value=1000), \
+             patch.object(bridge.native, 'preferences', return_value={'selected-avatar-id':'pet_original'}):
+            service.request('toggle')
+        self.assertEqual(service.pending_request.deadline, 1025)
+        service.root.after.assert_called_once_with(0, service.reconnect_if_needed)

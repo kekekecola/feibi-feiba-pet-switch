@@ -58,6 +58,7 @@ def load():
     if not isinstance(data, dict):
         raise ValueError('settings.json 必须为对象')
     data['hotkey'] = parse_hotkey(data.get('hotkey', 'F8'))[0]
+    data['memory_saving'] = data.get('memory_saving') is True
     return data
 
 
@@ -71,11 +72,21 @@ def save_hotkey(value):
             shutil.copy2(SETTINGS, SETTINGS.with_name('settings.broken.' + uuid.uuid4().hex + '.json'))
         data = {}
     data['hotkey'] = canonical
+    save(data)
+    return canonical
+
+
+def save_memory_saving(enabled):
+    data = load()
+    data['memory_saving'] = bool(enabled)
+    save(data)
+
+
+def save(data):
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     temporary = SETTINGS.with_name('settings.' + uuid.uuid4().hex + '.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     os.replace(temporary, SETTINGS)
-    return canonical
 
 
 def gui():

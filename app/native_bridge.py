@@ -34,6 +34,7 @@ SHUTDOWN_ACTIONS = {"quit", "quit-for-update"}
 ACTIONS = {"toggle", "take-off", "put-on"} | SHUTDOWN_ACTIONS
 PENDING_RESTORE = []
 SWITCH_QUEUE_SECONDS = 12
+MEMORY_IDLE_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -185,7 +186,8 @@ def confirm_playback(playback, conflict):
 
 def transition(action, report):
     started = time.perf_counter()
-    source = native.selected_form()
+    report(stage='native_window')
+    source = native.selected_form(refresh=False)
     if source is None:
         source = native.reconcile_selected()
     if source is None:
@@ -211,7 +213,7 @@ def transition(action, report):
     journal_started = False
     original_size = native.preferences().get("avatar-overlay-mascot-width-px", 112)
     try:
-        report(phase="preparing", form=source, target_form=target)
+        report(phase="preparing", stage="pet_cards", form=source, target_form=target)
         ensure_cg(allow_start=False)
         # Validate the fresh settings tree before hiding the original pet.
         card = selector.prepare(target, reuse_only=True)
@@ -233,7 +235,7 @@ def transition(action, report):
             visibility_guard.run(windows.user32, overlay.hwnd, stop_guard, visibility_conflict, hide_cg)
 
         guard = threading.Thread(target=keep_native_hidden, daemon=True)
-        report(phase="selecting_native", form=source, target_form=target, cg_position=[x, y], native_image_rect=list(bounds),
+        report(phase="selecting_native", stage="first_frame", form=source, target_form=target, cg_position=[x, y], native_image_rect=list(bounds),
                dpi=dpi, native_pet_size_px=original_size, native_visible=True)
         cg_action = "play-take-off" if target == "feiba" else "play-put-on"
         playback = cg_ipc.Ticket(cg_action, hold=True, await_native=True, x=x, y=y, dpi=dpi, native_width=native_width,
@@ -244,10 +246,10 @@ def transition(action, report):
                 raise RuntimeError('客户端反复显示原生窗口，已中止过渡以避免频闪。')
             if playback.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError("CG 未开始显示，原生选择已取消。")
-            time.sleep(0.04)
+            time.sleep(0.01)
         first_cg_ms = round((time.perf_counter() - started) * 1000, 1)
         guard.start()
-        report(phase="selecting_native", form=source, target_form=target, native_visible=False, cg_visible=True)
+        report(phase="selecting_native", stage="native_selection", form=source, target_form=target, native_visible=False, cg_visible=True)
         trace_focus("cg-visible")
         user = recovery_journal.api()
         def check_before_action():
@@ -264,7 +266,7 @@ def transition(action, report):
         commit.communicate(timeout=2)
         if commit.returncode != 0:
             raise RuntimeError('无法继续播放本次已确认的过渡。')
-        report(phase="transition", form=source, target_form=target, native_visible=False, cg_visible=True)
+        report(phase="transition", stage="animation", form=source, target_form=target, native_visible=False, cg_visible=True)
         output, error = playback.communicate(timeout=10)
         if playback.returncode != 0:
             raise RuntimeError("CG 播放失败：" + (error or output).decode("utf-8", "replace")[-300:])
@@ -274,7 +276,7 @@ def transition(action, report):
             raise RuntimeError("CG 未正常完成。")
         if native.selected_form(refresh=False) != target:
             raise RuntimeError("播放后原生宠物选择不匹配。")
-        report(phase="restoring", form=target)
+        report(phase="restoring", stage="native_display", form=target)
     finally:
         # Cleanup order prevents a second visible pet, including on failed selection.
         try:
@@ -347,6 +349,7 @@ class Bridge:
         self.next_manual_reconnect = 0
         self.next_health_check = 0
         self.next_maintenance = 0
+        self.last_activity = time.monotonic()
         self.state = {"running": True, "pid": os.getpid(), "phase": "starting",
                       "connection_state": "starting", "pending_switch": False,
                       "native_bridge_configured": True, "native_switch_confirmed": False,
@@ -354,10 +357,13 @@ class Bridge:
                       "hotkey": "F8", "hotkey_registered": False, "cg_visible": False}
         self.hotkey_events = queue.Queue()
         try:
-            desired_hotkey = settings.load()['hotkey']
+            config = settings.load()
+            desired_hotkey = config['hotkey']
+            self.state['memory_saving'] = config['memory_saving']
             settings_error = None
         except (OSError, ValueError) as error:
             desired_hotkey, settings_error = 'F8', str(error)
+            self.state['memory_saving'] = False
         self.hotkey = GlobalF8(self.hotkey_events, desired_hotkey, settings.last_good())
         self.settings_stamp = None
         self.progress_path = None
@@ -453,7 +459,8 @@ class Bridge:
             return
         with self.lock:
             connecting = self.state.get('connection_state') != 'ready'
-            if self.closing or self.pending_request or (self.busy and self.state.get('phase') != 'reconnecting'):
+            if (self.closing or self.pending_request
+                    or (self.busy and self.state.get('phase') not in ('reconnecting', 'releasing_helper'))):
                 self.ack(command_id, "ignored_busy", "当前过渡尚未结束。")
                 return
             if connecting:
@@ -470,7 +477,8 @@ class Bridge:
         except (OSError, ValueError):
             selected_id = None
         if selected_id:
-            self.pending_request = PendingSwitch(action, command_id, selected_id, now + SWITCH_QUEUE_SECONDS)
+            wait = 25 if self.state.get('connection_state') in ('sleeping', 'releasing_helper') else SWITCH_QUEUE_SECONDS
+            self.pending_request = PendingSwitch(action, command_id, selected_id, now + wait)
             self.update(pending_switch=True, pending_switch_notice=None)
         else:
             message = '请先在 Codex 显示一只已绑定的宠物，再按快捷键。'
@@ -533,7 +541,8 @@ class Bridge:
                 result['worker_total_ms'] = round((time.perf_counter()-worker_started)*1000, 1)
                 result['last_switch_failure'] = None
             self.progress_path = None
-            self.update(phase="idle", connection_state="ready", target_form=None, error=None, control_details=None, **result)
+            self.update(phase="idle", connection_state="ready", target_form=None, error=None,
+                        control_details=None, stage=None, **result)
             self.reconnect_failures = 0
             self.next_health_check = time.monotonic() + 3
             self.ack(command_id, "completed", "原生智能伙伴已切换。")
@@ -541,9 +550,10 @@ class Bridge:
         except Exception as error:
             logging.exception("Native transition failed")
             failure = {}
+            progress = control.read_json(self.progress_path) if self.progress_path else {}
+            stage = progress.get('stage') or progress.get('phase') or ('preparing' if action else 'background_page')
             if action:
-                progress = control.read_json(self.progress_path) if self.progress_path else {}
-                failure['last_switch_failure'] = dict(stage=progress.get('phase', 'preparing'),
+                failure['last_switch_failure'] = dict(stage=stage,
                     target=progress.get('target_form'), message=str(error),
                     details=getattr(error, 'details', None))
             # A killed COM worker cannot run its finally block. Its durable
@@ -560,7 +570,7 @@ class Bridge:
                 current_form = native.selected_form(refresh=False)
             except (OSError, ValueError):
                 current_form = None
-            self.update(phase="error", connection_state="disconnected", target_form=None, error=str(error),
+            self.update(phase="error", stage=stage, connection_state="disconnected", target_form=None, error=str(error),
                         native_switch_confirmed=False,
                         control_details=getattr(error,"details",None), form=current_form,
                         native_visible=None, cg_visible=cg_visible(), **failure)
@@ -580,9 +590,38 @@ class Bridge:
                 logging.exception('Progress file cleanup deferred')
             with self.lock:
                 self.busy = False
+                self.last_activity = time.monotonic()
+
+    def maybe_release_idle_helper(self):
+        if (self.closing or self.busy or not self.state.get('memory_saving') or self.state.get('connection_state') != 'ready'
+                or self.pending_request or recovery_journal.JOURNAL.exists()
+                or time.monotonic() - self.last_activity < MEMORY_IDLE_SECONDS):
+            return False
+        self.busy = True
+        self.update(phase='releasing_helper', connection_state='releasing_helper')
+        threading.Thread(target=self.release_idle_helper, daemon=True).start()
+        return True
+
+    def release_idle_helper(self):
+        try:
+            background.close()
+            if background.owned_window():
+                raise RuntimeError('辅助窗口仍在使用')
+            self.pool.close()
+            self.update(phase='sleeping', connection_state='sleeping', memory_saving_error=None)
+        except Exception as error:
+            logging.exception('Idle helper could not be released')
+            self.update(phase='idle', connection_state='ready', memory_saving_error=str(error))
+        finally:
+            with self.lock:
+                self.last_activity = time.monotonic()
+                self.busy = False
 
     def reconnect_if_needed(self):
         if self.closing or self.busy or time.monotonic() < self.next_reconnect:
+            return
+        if (self.state.get('connection_state') == 'sleeping' and self.state.get('memory_saving')
+                and not self.pending_request):
             return
         if (self.state.get('connection_state')=='ready' and not recovery_journal.JOURNAL.exists()
                 and time.monotonic()<self.next_health_check):
@@ -674,8 +713,11 @@ class Bridge:
                 stamp = settings.SETTINGS.stat().st_mtime_ns if settings.SETTINGS.exists() else 0
                 if stamp != self.settings_stamp:
                     try:
-                        self.hotkey.rebind(settings.load()['hotkey'])
-                        self.update(settings_error=None)
+                        config = settings.load()
+                        self.hotkey.rebind(config['hotkey'])
+                        if config['memory_saving'] != self.state.get('memory_saving'):
+                            self.last_activity = time.monotonic()
+                        self.update(settings_error=None, memory_saving=config['memory_saving'], memory_saving_error=None)
                         self.settings_stamp = stamp
                     except (OSError, ValueError) as error:
                         self.update(settings_error=str(error))
@@ -697,14 +739,15 @@ class Bridge:
                                     native_pet_size_px=prefs.get("avatar-overlay-mascot-width-px", 112))
                     except (OSError, ValueError):
                         self.update(form=None, selected_id=None)
-                    self.reconnect_if_needed()
+                    if not self.maybe_release_idle_helper():
+                        self.reconnect_if_needed()
                 else:
                     with self.lock:
                         if self.progress_path and self.state.get('phase') != 'idle':
                             path = self.progress_path
                             progress = control.read_json(path)
                             if self.progress_path == path and progress.get('token') == path.stem.removeprefix('progress-'):
-                                keys = ('phase','form','target_form','native_visible','cg_visible')
+                                keys = ('phase','stage','form','target_form','native_visible','cg_visible')
                                 self.update(**{key:progress[key] for key in keys if key in progress})
                         self.update()
             except Exception:
@@ -758,13 +801,15 @@ def main():
                 if action not in (None,'toggle','take-off','put-on') or not isinstance(token,str) or len(token)!=32 or any(c not in '0123456789abcdef' for c in token):
                     return 1
                 try:
-                    native.selected_form()
-                    if action is None or not background.owned_window():
-                        background.prepare()
-                    ensure_cg()
                     def report(**data):
                         path = RUNTIME / ('progress-'+token+'.json')
                         write_json(path, control.read_json(path) | data | {'token':token})
+                    if action is None or not background.owned_window():
+                        report(stage='background_page')
+                        background.prepare()
+                    if not action:
+                        report(stage='cg_player')
+                    ensure_cg()
                     result = transition(action, report) if action else {'form': native.selected_form(refresh=False)}
                     print(json.dumps(dict(job=request['job'],result=result),ensure_ascii=False),flush=True)
                 except Exception as error:

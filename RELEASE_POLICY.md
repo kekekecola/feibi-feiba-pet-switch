@@ -7,3 +7,5 @@
 - release-retention工作流在稳定版published事件运行，等待附件上传完成；若发行由不会触发后续事件的GitHub自动化令牌创建，维护者需在同一发行流程显式执行tools/retire_releases.py。
 
 用户只需下载安装一次，不应逐个版本创建或导入宠物。程序升级优先复用已有宠物。现存云端重复条目由对应账号用户选择保留和移除，安装器不自动删除。
+
+维护者从主分支手动运行「Publish verified Windows installer」。该流程在 Windows 检查通过后才创建草稿，上传并核对安装包 SHA-256 后公开，并清理历史安装附件。提交前将 VERSION 和 CHANGELOG.md 更新为目标版本。

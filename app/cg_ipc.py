@@ -5,6 +5,7 @@ import time
 import uuid
 from paths import RUNTIME
 import control
+import player_wake
 from request_lifecycle import decide
 
 
@@ -22,6 +23,7 @@ class Ticket:
         temporary.write_text(json.dumps(dict(command_id=self.command_id, action=action, issued_at=issued,
             expires_at=issued + (3 if action.startswith('play-') else 30), **parameters)),encoding='utf-8')
         os.replace(temporary,target)
+        player_wake.notify()
 
     def is_visible(self):
         state = control.status()

@@ -20,6 +20,7 @@ from tkinter import messagebox
 
 from PIL import Image, ImageChops
 import recovery_journal
+import player_wake
 from request_lifecycle import claim
 
 
@@ -427,6 +428,7 @@ class Player:
         self._save_state()
         self._animation_tick()
         self._poll_commands()
+        player_wake.listen(self)
         self._heartbeat()
         self._refresh_size()
         logging.info("Ready: title=%s pid=%s preview=%s renderer=UpdateLayeredWindow", TITLE, os.getpid(), preview)
@@ -733,6 +735,11 @@ class Player:
         })
 
     def _poll_commands(self) -> None:
+        self._drain_commands()
+        if not self.closed:
+            self.root.after(80, self._poll_commands)
+
+    def _drain_commands(self) -> None:
         if self.closed:
             return
         commands_dir = RUNTIME / "commands"
@@ -757,7 +764,6 @@ class Player:
             path.unlink(missing_ok=True)
             if self.closed:
                 return
-        self.root.after(80, self._poll_commands)
 
     def _heartbeat(self) -> None:
         if self.closed:

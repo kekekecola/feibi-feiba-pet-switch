@@ -131,6 +131,18 @@ class DesktopUpdateTests(unittest.TestCase):
         self.assertEqual(status_label({'phase':'transition'}), '正在切换')
         self.assertEqual(status_label({'phase':'idle','hotkey_error':'conflict'}), '快捷键异常')
 
+    def test_diagnostics_identifies_failure_stage(self):
+        state = {'stage':'native_selection','error':'selection not acknowledged'}
+        self.assertIn('确认原生宠物选择失败', diagnostics.summary(state, True, True))
+
+    def test_switching_memory_mode_does_not_replace_hotkey(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(settings, 'SETTINGS', Path(folder)/'settings.json'):
+                settings.save_hotkey('Ctrl+Alt+H')
+                self.assertFalse(settings.load()['memory_saving'])
+                settings.save_memory_saving(True)
+                self.assertEqual(settings.load(), {'hotkey':'Ctrl+Alt+H','memory_saving':True})
+
     def test_archive_and_digest(self):
         payload, digest = make_archive()
         with tempfile.TemporaryDirectory() as folder:

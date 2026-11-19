@@ -426,12 +426,26 @@ class ControlRoom:
         self.button(494,260,140,42,'检查更新',self.check_update,small=True)
         self.card(232,385,426,171)
         self.text(255,410,'状态与诊断',23,bold=True)
-        self.text(255,451,'遇到小状况，先看看运行状态。',17,C['muted'])
-        self.text(255,486,'报告保存在本机，不会自动上传。',15,C['muted'])
+        try:
+            memory_saving = settings.load()['memory_saving']
+        except (OSError, ValueError):
+            memory_saving = False
+        self.text(255,454,'闲置 5 分钟后释放辅助窗口',15,C['muted'])
+        self.text(255,479,'下次按快捷键时重新连接',15,C['muted'])
+        self.button(504,447,130,37,'省内存 · '+('开' if memory_saving else '关'),
+                    lambda:self.set_memory_saving(not memory_saving),small=True)
         self.button(490,504,144,35,'查看诊断详情',self.open_detail,small=True)
         self.button(232,578,202,40,'打开日志文件夹',lambda:os.startfile(str(DATA)),small=True)
         self.button(448,578,210,40,'使用说明',self.help,small=True)
         self.text(241,628,'诊断只保存在本机，不会自动上传',14,C['muted'])
+
+    def set_memory_saving(self, enabled):
+        try:
+            settings.save_memory_saving(enabled)
+        except (OSError, ValueError) as error:
+            self.notice(str(error))
+            return
+        self.draw()
 
     def notice(self,text):
         previous=set(self.c.find_all())

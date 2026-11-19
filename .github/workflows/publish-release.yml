@@ -1,0 +1,79 @@
+name: Publish verified Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: stable-release-downloads
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Archive and verify the installer
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '\r\n' < VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$version"
+          archive="feibi-feiba-pet-switch-$tag-windows.zip"
+          git archive --format=zip --prefix=feibi-feiba-pet-switch/ --output="$archive" "$GITHUB_SHA"
+          digest=$(sha256sum "$archive" | cut -d ' ' -f 1)
+          python - "$archive" "$digest" <<'PY'
+          import sys
+          import tempfile
+          from pathlib import Path
+          from manager import extract_archive
+
+          with tempfile.TemporaryDirectory() as folder:
+              extract_archive(Path(sys.argv[1]).read_bytes(), Path(folder), 'sha256:' + sys.argv[2])
+          PY
+          printf '%s\n' "tag=$tag" "archive=$archive" "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Upload draft and publish after digest verification
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          ARCHIVE_DIGEST: ${{ steps.package.outputs.digest }}
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$head" == "$GITHUB_SHA" ]]
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          [[ "$latest" != "$RELEASE_TAG" ]]
+          [[ "$(printf '%s\n' "$latest" "$RELEASE_TAG" | sort -V | tail -n 1)" == "$RELEASE_TAG" ]]
+          awk -v tag="$RELEASE_TAG" '
+            /^## / { if (found) exit; found=($2 == tag); next }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          grep -q '[[:graph:]]' release-notes.md
+          printf '\nZIP SHA-256: `%s`\n' "$ARCHIVE_DIGEST" >> release-notes.md
+          gh release create "$RELEASE_TAG" "$ARCHIVE" --target "$GITHUB_SHA" --draft --title "$RELEASE_TAG" --notes-file release-notes.md
+          release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\" and .draft) | .id")
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          digest=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq ".assets[] | select(.name == \"$ARCHIVE\" and .state == \"uploaded\") | .digest")
+          [[ "$digest" == "sha256:$ARCHIVE_DIGEST" ]]
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+      - name: Retire older installers
+        run: python tools/retire_releases.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
