@@ -18,17 +18,34 @@ from request_lifecycle import claim
 
 
 class TransitionReadinessTests(unittest.TestCase):
-    def test_helper_start_uses_expansion_without_toggling_open_menu(self):
-        trigger = Mock()
-        pattern = trigger.GetPattern.return_value
-        with patch.object(background.native, 'exists', return_value=True), \
-             patch.object(background.native, 'automation'), patch.object(background, 'click_background') as click:
-            pattern.ExpandCollapseState = 0
-            self.assertTrue(background.open_file_menu(trigger, Mock(), Mock(), Mock()))
-            pattern.ExpandCollapseState = 1
-            self.assertTrue(background.open_file_menu(trigger, Mock(), Mock(), Mock()))
-        pattern.Expand.assert_called_once_with(waitTime=0)
-        click.assert_not_called()
+    def test_prepare_without_helper_does_not_inspect_main_window(self):
+        with patch.object(background, 'owned_window', return_value=None), patch.object(background, 'api') as api:
+            with self.assertRaisesRegex(RuntimeError, '等待绑定'):
+                background.prepare()
+            api.assert_not_called()
+
+    def test_binding_never_adopts_a_previous_or_ambiguous_window(self):
+        windows = Mock()
+        windows.process_session.return_value = '42:123'
+        windows.user32.IsIconic.return_value = False
+        def item(hwnd):
+            return SimpleNamespace(hwnd=hwnd, pid=42, class_name='Chrome_WidgetWin_1', title='ChatGPT', visible=True, exstyle=0)
+        binding = {'pid':42, 'main':100, 'session':'42:123', 'original':[100,101], 'expires':time.time()+180}
+        windows.enumerate.return_value = [item(100),item(101),item(102)]
+        self.assertEqual(background.binding_candidate(windows,binding).hwnd,102)
+        for case in ([item(100),item(101)],[item(100),item(102),item(103)]):
+            windows.enumerate.return_value = case
+            with self.assertRaises(RuntimeError):
+                background.binding_candidate(windows,binding)
+
+    def test_binding_wrong_page_leaves_window_untouched(self):
+        windows = Mock()
+        candidate = SimpleNamespace(hwnd=102)
+        with patch.object(background, 'api', return_value=(windows,Mock())),              patch.object(background, 'binding_candidate', return_value=candidate),              patch.object(background, 'wait_for_pet_actions', side_effect=RuntimeError('wrong page')):
+            with self.assertRaisesRegex(RuntimeError,'wrong page'):
+                background.bind_new_window({})
+        windows.user32.SetPropW.assert_not_called()
+        windows.user32.SetForegroundWindow.assert_not_called()
 
     def test_unrelated_or_withdrawn_cg_cannot_authorize_selection(self):
         ticket = cg_ipc.Ticket.__new__(cg_ipc.Ticket)
@@ -93,20 +110,13 @@ class TransitionReadinessTests(unittest.TestCase):
             repair.assert_called_once_with(helper, 'feibi')
             self.assertTrue(selector.repaired)
 
-    def test_slow_list_arrival_does_not_repeat_pets_navigation(self):
+    def test_slow_list_arrival_waits_on_bound_window(self):
         helper = SimpleNamespace(hwnd=11)
         missing = msaa_controls.PetControlsError(['菲比啾比', '菲八啾比'], [], {})
         card = object()
-        with patch.object(background.native, 'automation'), \
-             patch.object(background.ui_labels, 'pattern', return_value='pets'), \
-             patch.object(background, 'setup_control', return_value=Mock()), \
-             patch.object(background.msaa_controls, 'semantic_action', return_value=Mock()), \
-             patch.object(background.msaa_controls, 'execute') as invoke, \
-             patch.object(background.msaa_controls, 'pet_actions', side_effect=[missing, missing, {'feibi':card}]), \
-             patch.object(background, 'click_background') as click, patch.object(background.time, 'sleep'):
-            self.assertIs(background._finish_prepare(helper, 'feibi'), card)
-            invoke.assert_called_once()
-            click.assert_not_called()
+        with patch.object(background.msaa_controls,'pet_actions',side_effect=[missing,missing,{'feibi':card}]) as read:
+            self.assertIs(background._finish_prepare(helper,'feibi'),card)
+        self.assertEqual([call.args[0] for call in read.call_args_list], [11,11,11])
 
     def test_ambiguous_list_is_not_repaired_or_clicked(self):
         selector = background.BackgroundSelection.__new__(background.BackgroundSelection)
@@ -197,29 +207,14 @@ class TransitionReadinessTests(unittest.TestCase):
             with patch('request_lifecycle.time.time', return_value=data['expires_at']+1):
                 self.assertFalse(claim(Path(folder) / 'decisions', data))
 
-    def test_settings_entry_can_be_button_instead_of_menu_item(self):
-        root = Mock()
-        with patch.object(background.ui_labels, 'pattern', return_value='settings'), \
-             patch.object(background.native, 'exists', side_effect=[False, True]):
-            self.assertIs(background.setup_control(root, 'settings'), root.ButtonControl.return_value)
-
-    def test_semantic_navigation_has_no_second_click_when_opened(self):
-        with patch.object(background, 'setup_control', return_value=Mock()), \
-             patch.object(background.msaa_controls, 'semantic_action', return_value=object()), \
-             patch.object(background.msaa_controls, 'execute') as execute, \
-             patch.object(background, 'click_background') as click, \
-             patch.object(background.ui_labels, 'pattern', return_value='settings'):
-            background.navigate_setup(Mock(), SimpleNamespace(hwnd=11), 'settings', lambda:True)
-            execute.assert_called_once()
-            click.assert_not_called()
-
     def test_helper_is_hidden_and_disabled_even_when_preparation_fails(self):
-        windows = Mock()
+        windows = Mock();helper = SimpleNamespace(hwnd=11,pid=22)
         with patch.object(background, 'api', return_value=(windows, Mock())), \
+             patch.object(background, 'window_from_state', return_value=helper), \
              patch.object(background, '_finish_prepare', side_effect=RuntimeError('menu failed')), \
              patch.object(background, 'invisible') as invisible:
             with self.assertRaises(RuntimeError):
-                background.finish_prepare(SimpleNamespace(hwnd=11))
+                background.finish_prepare(helper)
             self.assertEqual(invisible.call_count,2)
             self.assertEqual(invisible.call_args_list[0].kwargs,{'alpha':1})
             self.assertEqual(windows.user32.EnableWindow.call_args.args, (11, False))
@@ -239,21 +234,13 @@ class TransitionReadinessTests(unittest.TestCase):
         self.assertLess(args[2]+1400,-1920)
 
     def test_parking_happens_before_helper_can_receive_input(self):
-        windows=Mock();events=[]
+        windows=Mock();events=[];helper=SimpleNamespace(hwnd=11,pid=22)
         windows.user32.EnableWindow.side_effect=lambda hwnd,enabled:events.append(('enabled',enabled))
         with patch.object(background,'api',return_value=(windows,Mock())), \
+             patch.object(background,'window_from_state',return_value=helper), \
              patch.object(background,'invisible',side_effect=lambda *a,**k:events.append(('park',k.get('alpha',0)))), \
              patch.object(background,'_finish_prepare',return_value={'prepared':True}):
-            background.finish_prepare(SimpleNamespace(hwnd=11))
+            background.finish_prepare(helper)
         self.assertEqual(events[0],('park',1))
         self.assertEqual(events[1],('enabled',True))
         self.assertEqual(events[-1],('enabled',False))
-
-    def test_semantic_navigation_rejects_duplicate_entries(self):
-        def scan(hwnd, collect, include):
-            collect((1,0), 'Settings', 34, 'click', object())
-            collect((2,0), 'Settings', 43, 'click', object())
-            return False
-        with patch.object(msaa_controls, 'scan_actions', side_effect=scan):
-            with self.assertRaises(RuntimeError):
-                msaa_controls.semantic_action(11, '^Settings$')

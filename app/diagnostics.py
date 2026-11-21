@@ -37,7 +37,7 @@ def summary(state, heartbeat_fresh, running):
     if failure:
         return '上次切换在「' + STAGES.get(failure.get('stage'), '准备切换') + '」阶段未完成。'
     if state.get('phase') == 'sleeping':
-        return '省内存待机。按快捷键后重新打开辅助页。'
+        return '省内存待机。按快捷键后恢复预热进程。'
     return status_label(state) + '。'
 
 
@@ -45,7 +45,8 @@ def collect():
     state = control.read_json(RUNTIME / 'bridge-status.json')
     keys = ('version', 'phase', 'connection_state', 'shutdown_source', 'hotkey', 'hotkey_registered', 'hotkey_error',
             'tray_registered', 'tray_icon_custom', 'tray_error', 'settings_error', 'update_error', 'form', 'native_visible', 'cg_visible', 'native_switch_confirmed', 'error', 'control_details', 'timings_ms',
-            'switch_ready', 'pending_switch', 'pending_switch_notice', 'stage', 'memory_saving', 'memory_saving_error')
+            'switch_ready', 'pending_switch', 'pending_switch_notice', 'stage', 'memory_saving', 'memory_saving_error',
+            'helper_setup_pending', 'helper_setup_error')
     report = dict(version=VERSION, python=platform.python_version(), platform=platform.system(),
                   status={key:state.get(key) for key in keys},
                   heartbeat_fresh=time.time() - state.get('updated_at', 0) < 6,

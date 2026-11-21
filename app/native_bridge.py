@@ -31,7 +31,8 @@ APP_DIR = Path(__file__).resolve().parent
 from paths import RUNTIME, VERSION
 STATUS = RUNTIME / "bridge-status.json"
 SHUTDOWN_ACTIONS = {"quit", "quit-for-update"}
-ACTIONS = {"toggle", "take-off", "put-on"} | SHUTDOWN_ACTIONS
+BIND_ACTIONS = {"prepare-helper", "bind-helper"}
+ACTIONS = {"toggle", "take-off", "put-on"} | SHUTDOWN_ACTIONS | BIND_ACTIONS
 PENDING_RESTORE = []
 SWITCH_QUEUE_SECONDS = 12
 MEMORY_IDLE_SECONDS = 300
@@ -341,6 +342,7 @@ class Bridge:
         self.busy = False
         self.closing = False
         self.pending_request = None
+        self.helper_binding = None
         self.pool = isolated_calls.WarmWorker([str(Path(sys.executable).with_name('python.exe')), str(APP_DIR / 'native_bridge.py'), '--worker-server'])
         self.request_meta = {}
         self.room_processes = []
@@ -459,6 +461,9 @@ class Bridge:
             if not self.busy:
                 self.close()
             return
+        if action in BIND_ACTIONS:
+            self.request_binding(action, command_id)
+            return
         with self.lock:
             connecting = self.state.get('connection_state') != 'ready'
             if (self.closing or self.pending_request
@@ -466,11 +471,53 @@ class Bridge:
                 self.ack(command_id, "ignored_busy", "当前过渡尚未结束。")
                 return
             if connecting:
+                if self.state.get('connection_state') == 'awaiting_helper':
+                    self.ack(command_id, 'cancelled', '请在控制室的伙伴状态中绑定专用窗口。')
+                    return
                 self.queue_switch(action, command_id)
                 return
             self.busy = True
             self.update(phase="preparing", native_switch_confirmed=False, pending_switch_notice=None)
         threading.Thread(target=self.worker, args=(action, command_id), daemon=True).start()
+
+    def request_binding(self, action, command_id):
+        with self.lock:
+            if self.closing or self.busy:
+                self.ack(command_id, 'ignored_busy', '当前操作尚未结束，请稍后重试绑定。')
+                return
+            if action == 'prepare-helper':
+                try:
+                    self.helper_binding = background.begin_binding()
+                    self.update(helper_setup_pending=True, helper_setup_error=None)
+                    self.ack(command_id, 'completed', '请新建专用窗口，打开宠物设置页后回来确认绑定。')
+                except Exception as error:
+                    self.ack(command_id, 'failed', str(error))
+                return
+            if not self.helper_binding or time.time() >= self.helper_binding['expires']:
+                self.helper_binding = None
+                self.update(helper_setup_pending=False, helper_setup_error='绑定已过期，请重新准备。')
+                self.ack(command_id, 'cancelled', '绑定已过期，请重新准备。')
+                return
+            self.busy = True
+            self.update(phase='binding_helper', connection_state='binding_helper')
+            threading.Thread(target=self.bind_helper, args=(self.helper_binding, command_id), daemon=True).start()
+
+    def bind_helper(self, binding, command_id):
+        try:
+            isolated_calls.run([str(Path(sys.executable).with_name('python.exe')), str(APP_DIR / 'background_uia.py'),
+                                'bind', '--binding', json.dumps(binding)], timeout=12)
+            self.helper_binding = None
+            self.update(phase='starting', connection_state='disconnected',
+                        helper_setup_pending=False, helper_setup_error=None)
+            self.ack(command_id, 'completed', '辅助窗口已绑定，正在检查 F8 就绪状态。')
+        except Exception as error:
+            self.update(phase='awaiting_helper', connection_state='awaiting_helper', helper_setup_error=str(error))
+            self.ack(command_id, 'failed', str(error))
+        finally:
+            with self.lock:
+                self.next_health_check = 0
+                self.next_reconnect = 0
+                self.busy = False
 
     def queue_switch(self, action, command_id):
         now = time.monotonic()
@@ -606,9 +653,8 @@ class Bridge:
 
     def release_idle_helper(self):
         try:
-            background.close()
-            if background.owned_window():
-                raise RuntimeError('辅助窗口仍在使用')
+            # Keep the user-bound window. Closing it would require another
+            # explicit binding, rather than a transparent F8 wakeup.
             self.pool.close()
             self.update(phase='sleeping', connection_state='sleeping', memory_saving_error=None)
         except Exception as error:
@@ -630,7 +676,7 @@ class Bridge:
             if (self.update_client_pid and
                     native.Windows().process_session(self.update_client_pid) == self.update_client_session):
                 return
-        if (self.state.get('connection_state')=='ready' and not recovery_journal.JOURNAL.exists()
+        if (self.state.get('connection_state') in ('ready','awaiting_helper') and not recovery_journal.JOURNAL.exists()
                 and time.monotonic()<self.next_health_check):
             return
         self.next_health_check=time.monotonic()+3
@@ -640,8 +686,8 @@ class Bridge:
                 if not recovery_journal.recover(cg_visible()):
                     self.update(phase='recovering_native')
                     return
-            if (self.state.get("connection_state") == "ready"
-                    and background.owned_window() and control.status().get("running")):
+            helper = background.owned_window()
+            if self.state.get("connection_state") == "ready" and helper and control.status().get("running"):
                 return
             # Keep F8 alive while GPT is closed; initialize only after a primary window exists.
             try:
@@ -655,8 +701,8 @@ class Bridge:
             self.observe_client_launch(windows, main_window.pid)
             if sleeping:
                 return
-            if not background.owned_window() and windows.user32.IsIconic(main_window.hwnd):
-                self.update(phase='waiting_window', connection_state='waiting_window', native_switch_confirmed=False, error=None)
+            if not helper:
+                self.update(phase='awaiting_helper', connection_state='awaiting_helper', native_switch_confirmed=False, error=None)
                 return
             with self.lock:
                 self.busy = True
@@ -733,7 +779,7 @@ class Bridge:
                 continue
             if valid_command(command, path.stem, ACTIONS):
                 self.request_meta[path.stem] = command
-                if command['action'] in SHUTDOWN_ACTIONS and not claim(RUNTIME / 'bridge-decisions', command):
+                if command['action'] in (SHUTDOWN_ACTIONS | BIND_ACTIONS) and not claim(RUNTIME / 'bridge-decisions', command):
                     self.ack(path.stem, 'cancelled', '退出请求已取消或过期。')
                 else:
                     self.request(command["action"], path.stem)
@@ -757,6 +803,9 @@ class Bridge:
                     except (OSError, ValueError) as error:
                         self.update(settings_error=str(error))
                 if not self.busy:
+                    if self.helper_binding and time.time() >= self.helper_binding['expires']:
+                        self.helper_binding = None
+                        self.update(helper_setup_pending=False, helper_setup_error='绑定已过期，请重新准备。')
                     if time.monotonic() >= self.next_maintenance:
                         active = set(self.request_meta)
                         if self.pending_request and self.pending_request.command_id:

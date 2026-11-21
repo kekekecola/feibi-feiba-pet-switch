@@ -37,7 +37,7 @@ class ReconnectReadinessTests(unittest.TestCase):
         self.assertEqual(tray.status_label(state | {'phase':'reconnecting'}), '正在连接')
         self.assertEqual(tray.status_label(state | {'phase':'idle','connection_state':'ready'}), '可以切换')
 
-    def test_minimized_without_helper_waits_then_starts_when_restored(self):
+    def test_no_automatic_worker_at_start_or_after_restoring_without_helper(self):
         service = self.service()
         service.next_reconnect = 0
         windows = Mock()
@@ -49,11 +49,12 @@ class ReconnectReadinessTests(unittest.TestCase):
              patch.object(bridge.threading, 'Thread') as thread:
             journal.exists.return_value = False
             service.reconnect_if_needed()
-            self.assertEqual(service.state['connection_state'], 'waiting_window')
-            thread.assert_not_called()
+            self.assertEqual(service.state['connection_state'], 'awaiting_helper')
+            service.next_health_check=0
             service.reconnect_if_needed()
-            self.assertEqual(service.state['connection_state'], 'reconnecting')
-            thread.return_value.start.assert_called_once()
+            self.assertEqual(service.state['connection_state'], 'awaiting_helper')
+            thread.assert_not_called()
+            windows.user32.SetForegroundWindow.assert_not_called()
 
     def test_press_during_backoff_queues_one_switch_and_wakes_reconnect(self):
         service = self.service()
@@ -110,7 +111,7 @@ class ReconnectReadinessTests(unittest.TestCase):
             self.assertTrue(service.maybe_release_idle_helper())
             thread.return_value.start.assert_called_once()
             service.release_idle_helper()
-            close.assert_called_once()
+            close.assert_not_called()
             service.pool.close.assert_called_once()
             self.assertEqual(service.state['connection_state'], 'sleeping')
             service.reconnect_if_needed()

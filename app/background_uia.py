@@ -8,12 +8,10 @@ import json
 import logging
 import os
 from pathlib import Path
-import threading
 import time
 
 import native_uia as native
 import msaa_controls
-import ui_labels
 
 from paths import RUNTIME
 STATE = RUNTIME / "background-settings.json"
@@ -38,44 +36,6 @@ def api():
     return windows, setter
 
 
-def invoke_background(control):
-    auto = native.automation()
-    for kind, method in ((auto.PatternId.InvokePattern, "Invoke"),
-                         (auto.PatternId.TogglePattern, "Toggle"),
-                         (auto.PatternId.SelectionItemPattern, "Select"),
-                         (auto.PatternId.LegacyIAccessiblePattern, "DoDefaultAction")):
-        pattern = control.GetPattern(kind)
-        if pattern:
-            getattr(pattern, method)(waitTime=0)
-            return
-    raise RuntimeError("后台控件不支持直接调用，已取消；不会移动鼠标或激活前台。")
-
-
-def open_file_menu(file_menu, menu, main, windows):
-    """Expand Chromium's titlebar menu without toggling an already-open popup."""
-    try:
-        pattern = file_menu.GetPattern(native.automation().PatternId.ExpandCollapsePattern)
-        if pattern:
-            if pattern.ExpandCollapseState != 1:
-                pattern.Expand(waitTime=0)
-            if native.exists(menu, 2):
-                return True
-            if pattern.ExpandCollapseState == 1:
-                return False
-    except Exception:
-        logging.debug('File menu ExpandCollapse unavailable', exc_info=True)
-    try:
-        invoke_background(file_menu)
-    except Exception:
-        logging.debug('File menu direct action unavailable', exc_info=True)
-    if native.exists(menu, 1):
-        return True
-    if windows.user32.IsIconic(main.hwnd):
-        return False
-    click_background(file_menu, main)
-    return native.exists(menu, 2)
-
-
 def owned_window():
     global _next_recovery_scan
     windows, _ = api()
@@ -91,13 +51,11 @@ def owned_window():
         return None
     _next_recovery_scan=time.monotonic()+3
     all_windows = windows.enumerate()
-    for window in all_windows:
-        if (window.hwnd == state.get("hwnd") and window.pid == state.get("pid")
-                and windows.user32.GetPropW(window.hwnd, MARKER) == MARKER_VALUE):
-            return window
     # A setup provider may hang after creating the window but before returning.
     # Recover only our uniquely marked helper, never an arbitrary GPT window.
-    marked = [w for w in all_windows if windows.user32.GetPropW(w.hwnd, MARKER) == MARKER_VALUE]
+    marked = [w for w in all_windows if w.exstyle & 0x80
+              and w.hwnd != state.get('original_main_hwnd')
+              and windows.user32.GetPropW(w.hwnd, MARKER) == MARKER_VALUE]
     if len(marked) == 1:
         helper = marked[0]
         mains = [w for w in all_windows if w.hwnd != helper.hwnd and w.visible
@@ -112,7 +70,8 @@ def owned_window():
 def window_from_state(windows,state):
     hwnd,pid=state.get('hwnd'),state.get('pid')
     user=windows.user32
-    if type(hwnd) is not int or type(pid) is not int or not user.IsWindow(hwnd):
+    if (type(hwnd) is not int or type(pid) is not int
+            or hwnd == state.get('original_main_hwnd') or not user.IsWindow(hwnd)):
         return None
     actual=wintypes.DWORD()
     user.GetWindowThreadProcessId(hwnd,ctypes.byref(actual))
@@ -134,51 +93,6 @@ def save_state(window, main_hwnd):
     os.replace(temporary, STATE)
 
 
-def click_background(control, window):
-    """Deliver pointer messages to the matched renderer without cursor/focus input."""
-    windows, _ = api()
-    u = windows.user32
-    bounds = control.BoundingRectangle
-    x, y = (bounds.left + bounds.right) // 2, (bounds.top + bounds.bottom) // 2
-    candidates = []
-    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def visit(hwnd, _):
-        name = ctypes.create_unicode_buffer(256)
-        u.GetClassNameW(hwnd, name, len(name))
-        if name.value == "Chrome_RenderWidgetHostHWND":
-            rect = wintypes.RECT()
-            u.GetWindowRect(hwnd, ctypes.byref(rect))
-            if rect.left <= x < rect.right and rect.top <= y < rect.bottom:
-                candidates.append(hwnd)
-        return True
-    u.EnumChildWindows.argtypes = [wintypes.HWND, callback_type, wintypes.LPARAM]
-    u.EnumChildWindows(window.hwnd, callback_type(visit), 0)
-    # Current Electron/Aura builds host input on Chrome_WidgetWin_1 itself
-    # and expose only an Intermediate D3D Window as a child.
-    if not candidates:
-        candidates.append(window.hwnd)
-    if len(candidates) != 1:
-        raise RuntimeError("无法唯一定位后台按钮所在的渲染窗口。")
-    point = wintypes.POINT(x, y)
-    u.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
-    u.ScreenToClient(candidates[0], ctypes.byref(point))
-    position = (point.y & 0xffff) << 16 | (point.x & 0xffff)
-    u.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
-        wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
-    u.SendMessageTimeoutW.restype = wintypes.LPARAM
-    result = ctypes.c_size_t()
-    try:
-        for message, flags in ((0x0200, 0), (0x0201, 1), (0x0202, 0)):
-            if not u.SendMessageTimeoutW(candidates[0], message, flags, position, 2, 1000, ctypes.byref(result)):
-                raise RuntimeError("后台控件没有响应指针消息。")
-    except Exception:
-        # Never leave a provider with a synthetic button-down/capture after a
-        # timeout. These messages target only this operation's renderer.
-        u.PostMessageW(candidates[0], 0x0202, 0, position)
-        u.PostMessageW(candidates[0], 0x001f, 0, 0)
-        raise
-
-
 def parked_position(window, user):
     return user.GetSystemMetrics(76)-max(1,window.rect[2]-window.rect[0])-128, user.GetSystemMetrics(77)
 
@@ -197,165 +111,80 @@ def invisible(window, alpha=0):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def restore_setup_focus(target, helper, original_main=None):
-    windows, _ = api()
-    if not target or not windows.user32.IsWindow(target) or not windows.user32.IsWindowVisible(target):
-        target = original_main
-    if not target or not windows.user32.IsWindow(target):
-        return
-    # Chromium can finish focusing its new page after the shortcut returns.
-    for _ in range(5):
-        current = windows.user32.GetForegroundWindow()
-        if current not in (helper, target, original_main):
-            return  # Respect a user who deliberately switched to another application.
-        if current != target:
-            windows.user32.SetForegroundWindow(target)
-            if windows.user32.GetForegroundWindow() != target:
-                # Reconnect preparation temporarily activates an invisible native
-                # window. Join its input queue only while restoring the real view.
-                user = windows.user32
-                user.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-                user.BringWindowToTop.argtypes = [wintypes.HWND]
-                kernel = windows.kernel32
-                kernel.GetCurrentThreadId.restype = wintypes.DWORD
-                thread = kernel.GetCurrentThreadId()
-                foreground_thread = user.GetWindowThreadProcessId(current, None)
-                attached = thread != foreground_thread and user.AttachThreadInput(thread, foreground_thread, True)
-                try:
-                    user.BringWindowToTop(target)
-                    user.SetForegroundWindow(target)
-                finally:
-                    if attached:
-                        user.AttachThreadInput(thread, foreground_thread, False)
-        time.sleep(0.06)
+def is_dedicated_candidate(window, pid, original):
+    return (window.pid == pid and window.hwnd not in original and window.visible
+            and window.class_name == 'Chrome_WidgetWin_1' and window.title == 'ChatGPT'
+            and not window.exstyle & (0x80 | 0x08))
 
 
-def prepare(rebuild=True):
-    existing = owned_window()
-    if existing:
-        try:
-            msaa_controls.pet_actions(existing.hwnd, native.PET_NAMES)
-            ready = True
-        except RuntimeError as error:
-            if ambiguous_cards(error):
-                raise
-            ready = False
-        if ready:
-            windows, _ = api()
-            invisible(existing)
-            windows.user32.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
-            windows.user32.EnableWindow(existing.hwnd, False)
-            return {"prepared": True, "hwnd": existing.hwnd, "reused": True}
-        try:
-            return finish_prepare(existing)
-        except RuntimeError as error:
-            if not rebuild or ambiguous_cards(error):
-                raise
-            # A stale Chromium renderer can retain a marked HWND indefinitely.
-            # Replace our helper once; never close or navigate the user's view.
-            logging.warning('Background navigation failed; replacing owned helper once')
-            close()
-            if owned_window():
-                raise RuntimeError('旧辅助窗口未关闭，稍后重试后台连接。') from error
-            return prepare(rebuild=False)
+def begin_binding():
     windows, _ = api()
     main = windows.main()
-    if windows.user32.IsIconic(main.hwnd):
-        raise RuntimeError("Codex 主窗口已最小化。打开窗口后会自动重新连接。")
-    foreground = windows.user32.GetForegroundWindow()
-    original = {w.hwnd for w in windows.enumerate()}
-    root = native.automation().ControlFromHandle(main.hwnd)
-    menu = root.MenuItemControl(searchDepth=26, RegexName=ui_labels.pattern("new_window"))
-    if not native.exists(menu, 0.3):
-        file_menu = root.MenuItemControl(searchDepth=24, AutomationId="application-menu-trigger-file-menu")
-        if not native.exists(file_menu, 1):
-            raise RuntimeError("找不到 GPT 新窗口菜单入口。")
-        if not open_file_menu(file_menu, menu, main, windows):
-            if windows.user32.IsIconic(main.hwnd):
-                raise RuntimeError("Codex 主窗口已最小化。打开窗口后会自动重新连接。")
-            raise RuntimeError("找不到 GPT 新建窗口菜单。")
-    found = []
-    stop = threading.Event()
+    session = windows.process_session(main.pid)
+    existing = [w.hwnd for w in windows.enumerate() if w.pid == main.pid]
+    if not session or main.hwnd not in existing:
+        raise RuntimeError('无法确认当前 Codex 窗口，请打开 Codex 后再试。')
+    return {'pid': main.pid, 'main': main.hwnd, 'session': session,
+            'original': existing, 'expires': time.time() + 180}
 
-    def catch_new_window():
-        deadline = time.monotonic() + 12
-        while not stop.is_set() and time.monotonic() < deadline:
-            for window in windows.enumerate():
-                if (window.pid == main.pid and window.hwnd not in original
-                        and window.class_name == "Chrome_WidgetWin_1" and window.title == "ChatGPT"):
-                    windows.user32.SetPropW(window.hwnd, MARKER, MARKER_VALUE)
-                    save_state(window, main.hwnd)
-                    invisible(window)
-                    if not found:
-                        found.append(window)
-                    stop.set()
-                    return
-            stop.wait(0.025)
 
-    watcher = threading.Thread(target=catch_new_window, daemon=True)
-    watcher.start()
+def binding_candidate(windows, binding):
+    if (time.time() >= binding['expires'] or
+            windows.process_session(binding['pid']) != binding['session'] or
+            not windows.user32.IsWindow(binding['main'])):
+        raise RuntimeError('这次绑定已过期，或 Codex 已重启。请重新准备。')
+    candidates = [w for w in windows.enumerate() if
+                  is_dedicated_candidate(w, binding['pid'], binding['original'])
+                  and not windows.user32.IsIconic(w.hwnd)]
+    if len(candidates) != 1:
+        raise RuntimeError('请只新建一个专用 Codex 窗口，并在新窗口打开宠物设置页。')
+    return candidates[0]
+
+
+def bind_new_window(binding):
+    windows, setter = api()
+    candidate = binding_candidate(windows, binding)
+    # Only read before the dedicated window has been confirmed. A wrong page
+    # stays visible for correction, and any COM timeout here has no side effect.
+    wait_for_pet_actions(candidate.hwnd, 3)
+    if binding_candidate(windows, binding).hwnd != candidate.hwnd:
+        raise RuntimeError('新窗口已变更，未完成绑定。')
+    old = owned_window()
+    user = windows.user32
+    if user.GetForegroundWindow() == candidate.hwnd:
+        raise RuntimeError('请在控制室里确认绑定，让专用窗口处于后台。')
+    if not user.SetPropW(candidate.hwnd, MARKER, MARKER_VALUE):
+        raise RuntimeError('无法登记新窗口的辅助用途。')
     try:
-        try:
-            invoke_background(menu)
-        except Exception:
-            if not native.exists(menu, 0) or windows.user32.IsIconic(main.hwnd):
-                raise
-            click_background(menu, main)
-        else:
-            # Some Chromium providers acknowledge the menu action without
-            # dismissing the popup. Retry only when the same item stays open.
-            if not stop.wait(1.5) and not found and native.exists(menu, 0) and not windows.user32.IsIconic(main.hwnd):
-                click_background(menu, main)
-        deadline = time.monotonic() + 10
-        while not found and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if not found:
-            raise RuntimeError("未找到新创建的 GPT 辅助窗口。")
-        helper = found[0]
-        save_state(helper, main.hwnd)
-        return finish_prepare(helper)
-    finally:
-        stop.set()
-        watcher.join(timeout=1)
-        if found:
-            restore_setup_focus(foreground, found[0].hwnd, main.hwnd)
-        elif foreground and windows.user32.IsWindow(foreground):
-            windows.user32.SetForegroundWindow(foreground)
-
-
-def setup_control(root, key, timeout=.2):
-    # Client releases expose the same entry as either a menu item, button or tab.
-    kinds = ('ButtonControl', 'TabItemControl', 'HyperlinkControl') if key == 'pets' else ('MenuItemControl', 'ButtonControl')
-    for kind in kinds:
-        control = getattr(root, kind)(searchDepth=28, RegexName=ui_labels.pattern(key))
-        if native.exists(control, timeout):
-            return control
-    return None
-
-
-def navigate_setup(root, helper, key, destination):
-    """One semantic action, observed result, then one setup-only message fallback."""
-    control = setup_control(root, key)
-    if control is None:
-        raise RuntimeError('后台导航入口未就绪：' + key)
-    try:
-        msaa_controls.execute(msaa_controls.semantic_action(helper.hwnd, ui_labels.pattern(key)))
+        invisible(candidate)
+        save_state(candidate, binding['main'])
     except Exception:
-        try:
-            invoke_background(control)
-        except Exception:
-            logging.warning('Setup navigation pattern unavailable: %s', key)
-            click_background(control, helper)
-            if not destination():
-                raise RuntimeError('后台导航没有响应：' + key)
-            return
-    if destination():
-        return
-    # Some providers advertise an action which is a no-op. Do not double-toggle
-    # an already-open menu; re-observe the destination before sending messages.
-    click_background(control, helper)
-    if not destination():
-        raise RuntimeError('后台导航没有响应：' + key)
+        user.RemovePropW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+        user.RemovePropW(candidate.hwnd, MARKER)
+        user.SetLayeredWindowAttributes(candidate.hwnd, 0, 255, 2)
+        setter(candidate.hwnd, -20, candidate.exstyle)
+        user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user.SetWindowPos(candidate.hwnd, None, *candidate.rect[:2], 0, 0, 0x0015)
+        raise
+    user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    user.EnableWindow(candidate.hwnd, False)
+    if old and old.hwnd != candidate.hwnd and window_from_state(windows, {'hwnd':old.hwnd,'pid':old.pid}):
+        user.PostMessageW(old.hwnd, 0x0010, 0, 0)
+    return {'bound': True}
+
+
+def prepare():
+    helper = owned_window()
+    if helper is None:
+        raise RuntimeError('等待绑定辅助窗口，请在控制室的伙伴状态中准备绑定。')
+    try:
+        msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
+    except RuntimeError as error:
+        if ambiguous_cards(error):
+            raise
+        return finish_prepare(helper)
+    return {'prepared': True, 'hwnd': helper.hwnd, 'reused': True}
 
 
 def ambiguous_cards(error):
@@ -377,6 +206,10 @@ def wait_for_pet_actions(hwnd, seconds):
 def finish_prepare(helper, target=None):
     windows, _ = api()
     user = windows.user32
+    live = window_from_state(windows, {'hwnd': helper.hwnd, 'pid': helper.pid})
+    if not live or user.GetForegroundWindow() == helper.hwnd:
+        raise RuntimeError('辅助窗口身份或前台状态有变化，请重新绑定。')
+    helper = live
     user.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
     # Park before enabling or changing alpha: even a killed setup worker must
     # never leave a near-transparent, enabled window over the user's desktop.
@@ -396,55 +229,8 @@ def finish_prepare(helper, target=None):
 
 
 def _finish_prepare(helper, target=None):
-    r = native.automation().ControlFromHandle(helper.hwnd)
-    # New windows may asynchronously restore the settings route. Wait for a
-    # usable route rather than treating its temporary blank tree as menu failure.
-    deadline = time.monotonic() + 10
-    while True:
-        try:
-            actions = msaa_controls.pet_actions(helper.hwnd, native.PET_NAMES)
-            if target:
-                return actions[target]
-            return {'prepared':True, 'hwnd':helper.hwnd, 'reused':True}
-        except RuntimeError as error:
-            if ambiguous_cards(error):
-                raise
-        if (setup_control(r, 'pets', .1) is not None
-                or setup_control(r, 'settings', .1) is not None
-                or setup_control(r, 'profile', .1) is not None):
-            break
-        if time.monotonic() >= deadline:
-            raise RuntimeError('辅助 GPT 窗口尚未加载完成。')
-        time.sleep(.15)
-    if setup_control(r, 'pets') is None:
-        # A pre-existing profile menu must be used directly, not toggled closed.
-        if setup_control(r, 'settings') is None:
-            if setup_control(r, 'profile', 2) is None:
-                raise RuntimeError('辅助 GPT 窗口尚未加载完成。')
-            navigate_setup(r, helper, 'profile', lambda: setup_control(r, 'settings', .6) is not None)
-        navigate_setup(r, helper, 'settings', lambda: setup_control(r, 'pets', .6) is not None)
-    section = setup_control(r, 'pets')
-    if section is None:
-        raise RuntimeError('后台宠物设置入口在加载期间消失。')
-    try:
-        msaa_controls.execute(msaa_controls.semantic_action(helper.hwnd, ui_labels.pattern('pets')))
-    except Exception:
-        invoke_background(section)
-    try:
-        # Opening the section and receiving the pet list are asynchronous.
-        # Give it time to fill before retrying the navigation.
-        actions = wait_for_pet_actions(helper.hwnd, 4)
-    except RuntimeError as error:
-        if ambiguous_cards(error):
-            raise
-        section = setup_control(r, 'pets')
-        if section is None:
-            raise
-        click_background(section, helper)
-        actions = wait_for_pet_actions(helper.hwnd, 5)
-    if target:
-        return actions[target]
-    return {"prepared": True, "hwnd": helper.hwnd, "reused": False}
+    actions = wait_for_pet_actions(helper.hwnd, 5)
+    return actions[target] if target else {'prepared': True, 'hwnd': helper.hwnd, 'reused': True}
 
 
 class BackgroundSelection:
@@ -453,11 +239,6 @@ class BackgroundSelection:
         self.window = owned_window()
         if not self.window:
             raise RuntimeError("后台设置窗口未就绪。请先重新启动 F8 切换器完成准备。")
-        self.original_main = json.loads(STATE.read_text(encoding="utf-8")).get("original_main_hwnd")
-        if windows.user32.GetForegroundWindow() == self.window.hwnd:
-            restore_setup_focus(self.original_main, self.window.hwnd, self.original_main)
-        self.root = native.automation().ControlFromHandle(self.window.hwnd)
-        self.foreground_before = windows.user32.GetForegroundWindow()
 
     def prepare(self, target, repair=True, reuse_only=False):
         self.repaired = False
@@ -487,7 +268,6 @@ class BackgroundSelection:
             if window is None:
                 raise RuntimeError('后台设置窗口恢复失败，未执行原生切换。')
             self.window = window
-            self.root = native.automation().ControlFromHandle(window.hwnd)
             self.repaired = True
             return msaa_controls.pet_actions(window.hwnd, native.PET_NAMES)[target]
 
@@ -525,28 +305,16 @@ class BackgroundSelection:
                 user.EnableWindow(hwnd, False)
 
     def restore(self):
-        # Re-created Chromium windows can request focus after loading completes.
-        if self.windows.user32.GetForegroundWindow() == self.window.hwnd:
-            target = self.foreground_before if self.foreground_before != self.window.hwnd else self.original_main
-            restore_setup_focus(target, self.window.hwnd, self.original_main)
-        return
+        release_helper_focus()
 
 
 def release_helper_focus():
+    """Keep only the owned helper off screen; never activate a user window."""
     windows, _ = api()
-    # Reassert parking for an existing helper if Chromium changes its geometry
-    # or topmost state. Never apply this policy to an unmarked client window.
-    helper=owned_window()
-    if helper and (helper.rect[2]>=windows.user32.GetSystemMetrics(76)
-                   or helper.exstyle&0x8 or not helper.exstyle&0x20):
+    helper = owned_window()
+    if helper and (helper.rect[2] >= windows.user32.GetSystemMetrics(76)
+                   or helper.exstyle & 0x8 or not helper.exstyle & 0x20):
         invisible(helper)
-    current = windows.user32.GetForegroundWindow()
-    if windows.user32.GetPropW(current, MARKER) != MARKER_VALUE:
-        return
-    window = owned_window()
-    if window and window.hwnd == current:
-        original = json.loads(STATE.read_text(encoding="utf-8")).get("original_main_hwnd")
-        restore_setup_focus(original, window.hwnd, original)
 
 
 def close():
@@ -561,10 +329,23 @@ def close():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("prepare", "status", "close"))
-    action = parser.parse_args().action
+    parser.add_argument("action", choices=("prepare", "status", "close", "bind"))
+    parser.add_argument("--binding")
+    args = parser.parse_args()
+    action = args.action
     native.dpi_awareness()
-    if action == "prepare":
+    if action == "bind":
+        import sys
+        sys.coinit_flags = 0
+        sys.stdout.reconfigure(encoding="utf-8")
+        auto = native.automation()
+        with auto.UIAutomationInitializerInThread():
+            try:
+                print(json.dumps(bind_new_window(json.loads(args.binding)), ensure_ascii=False))
+            except Exception as error:
+                print(json.dumps({"error": str(error)}, ensure_ascii=False))
+                return 1
+    elif action == "prepare":
         print(json.dumps(prepare(), ensure_ascii=True))
     elif action == "status":
         window = owned_window()
