@@ -20,32 +20,48 @@ from request_lifecycle import claim
 class TransitionReadinessTests(unittest.TestCase):
     def test_prepare_without_helper_does_not_inspect_main_window(self):
         with patch.object(background, 'owned_window', return_value=None), patch.object(background, 'api') as api:
-            with self.assertRaisesRegex(RuntimeError, '等待绑定'):
+            with self.assertRaisesRegex(RuntimeError, '尚未连接'):
                 background.prepare()
             api.assert_not_called()
 
-    def test_binding_never_adopts_a_previous_or_ambiguous_window(self):
+    def test_one_shot_connection_never_touches_an_already_open_menu(self):
         windows = Mock()
-        windows.process_session.return_value = '42:123'
-        windows.user32.IsIconic.return_value = False
-        def item(hwnd):
-            return SimpleNamespace(hwnd=hwnd, pid=42, class_name='Chrome_WidgetWin_1', title='ChatGPT', visible=True, exstyle=0)
-        binding = {'pid':42, 'main':100, 'session':'42:123', 'original':[100,101], 'expires':time.time()+180}
-        windows.enumerate.return_value = [item(100),item(101),item(102)]
-        self.assertEqual(background.binding_candidate(windows,binding).hwnd,102)
-        for case in ([item(100),item(101)],[item(100),item(102),item(103)]):
-            windows.enumerate.return_value = case
-            with self.assertRaises(RuntimeError):
-                background.binding_candidate(windows,binding)
+        windows.enumerate.return_value = []
+        pattern = Mock(ExpandCollapseState=1)
+        intent = {'hwnd':11,'captured':time.monotonic()}
+        with patch.object(background, 'api', return_value=(windows,Mock())), \
+             patch.object(background, 'same_foreground', return_value=True), \
+             patch.object(background.ui_labels, 'pattern', return_value='new'), \
+             patch.object(background.native, 'automation'), \
+             patch.object(background, 'file_pattern', return_value=pattern):
+            with self.assertRaisesRegex(RuntimeError,'文件菜单正在使用'):
+                background.provision(intent)
+        pattern.Expand.assert_not_called()
+        pattern.Collapse.assert_not_called()
 
-    def test_binding_wrong_page_leaves_window_untouched(self):
+    def test_missing_window_entry_closes_only_the_menu_opened_for_f8(self):
         windows = Mock()
-        candidate = SimpleNamespace(hwnd=102)
-        with patch.object(background, 'api', return_value=(windows,Mock())),              patch.object(background, 'binding_candidate', return_value=candidate),              patch.object(background, 'wait_for_pet_actions', side_effect=RuntimeError('wrong page')):
-            with self.assertRaisesRegex(RuntimeError,'wrong page'):
-                background.bind_new_window({})
-        windows.user32.SetPropW.assert_not_called()
-        windows.user32.SetForegroundWindow.assert_not_called()
+        windows.enumerate.return_value = []
+        pattern = Mock(ExpandCollapseState=0)
+        def expand(**kwargs):
+            pattern.ExpandCollapseState = 1
+        pattern.Expand.side_effect = expand
+        intent = {'hwnd':11, 'pid':22, 'session':'22:1','input':2,'captured':time.monotonic()}
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(background, 'MENU_LEASE', Path(folder)/'lease.json'), \
+             patch.object(background, 'api', return_value=(windows,Mock())), \
+             patch.object(background, 'same_foreground', return_value=True), \
+             patch.object(background, 'still_user_request', return_value=True), \
+             patch.object(background, 'input_tick', return_value=2), \
+             patch.object(background.ui_labels, 'pattern', return_value='new'), \
+             patch.object(background.native, 'automation'), \
+             patch.object(background.native, 'exists', return_value=False), \
+             patch.object(background, 'file_pattern', return_value=pattern):
+            with self.assertRaisesRegex(RuntimeError,'未找到新窗口入口'):
+                background.provision(intent)
+            self.assertFalse(background.MENU_LEASE.exists())
+        pattern.Expand.assert_called_once()
+        pattern.Collapse.assert_called_once()
 
     def test_unrelated_or_withdrawn_cg_cannot_authorize_selection(self):
         ticket = cg_ipc.Ticket.__new__(cg_ipc.Ticket)
@@ -114,7 +130,8 @@ class TransitionReadinessTests(unittest.TestCase):
         helper = SimpleNamespace(hwnd=11)
         missing = msaa_controls.PetControlsError(['菲比啾比', '菲八啾比'], [], {})
         card = object()
-        with patch.object(background.msaa_controls,'pet_actions',side_effect=[missing,missing,{'feibi':card}]) as read:
+        with patch.object(background.native,'automation'), patch.object(background,'setup_control',return_value=None), \
+             patch.object(background.msaa_controls,'pet_actions',side_effect=[missing,missing,{'feibi':card}]) as read:
             self.assertIs(background._finish_prepare(helper,'feibi'),card)
         self.assertEqual([call.args[0] for call in read.call_args_list], [11,11,11])
 

@@ -31,8 +31,7 @@ APP_DIR = Path(__file__).resolve().parent
 from paths import RUNTIME, VERSION
 STATUS = RUNTIME / "bridge-status.json"
 SHUTDOWN_ACTIONS = {"quit", "quit-for-update"}
-BIND_ACTIONS = {"prepare-helper", "bind-helper"}
-ACTIONS = {"toggle", "take-off", "put-on"} | SHUTDOWN_ACTIONS | BIND_ACTIONS
+ACTIONS = {"toggle", "take-off", "put-on"} | SHUTDOWN_ACTIONS
 PENDING_RESTORE = []
 SWITCH_QUEUE_SECONDS = 12
 MEMORY_IDLE_SECONDS = 300
@@ -342,7 +341,6 @@ class Bridge:
         self.busy = False
         self.closing = False
         self.pending_request = None
-        self.helper_binding = None
         self.pool = isolated_calls.WarmWorker([str(Path(sys.executable).with_name('python.exe')), str(APP_DIR / 'native_bridge.py'), '--worker-server'])
         self.request_meta = {}
         self.room_processes = []
@@ -366,14 +364,7 @@ class Bridge:
         except (OSError, ValueError) as error:
             desired_hotkey, settings_error = 'F8', str(error)
             self.state['memory_saving'] = False
-        managed_home = os.environ.get('FEIBI_SWITCH_HOME')
-        self.activation_journal = Path(managed_home) / 'pending-update.json' if managed_home else None
-        activation = control.read_json(self.activation_journal) if self.activation_journal else {}
-        # Older installed updaters expect a registered hotkey during handoff.
-        # Honor that short health check, then apply our normal ownership rule.
-        self.legacy_activation = bool(activation.get('previous') and not activation.get('accepts_deferred_hotkey'))
-        self.hotkey_enabled = self.legacy_activation
-        self.hotkey = GlobalF8(self.hotkey_events, desired_hotkey, settings.last_good(), enabled=self.hotkey_enabled)
+        self.hotkey = GlobalF8(self.hotkey_events, desired_hotkey, settings.last_good())
         self.settings_stamp = None
         self.progress_path = None
         self.tray = tray.Tray(self.hotkey_events)
@@ -388,13 +379,6 @@ class Bridge:
         with self.lock:
             self.state.update(changes)
             self.state['switch_ready'] = tray.pet_ready(self.state) and self.state.get('phase') == 'idle'
-            enabled = self.state.get('connection_state') in ('ready', 'sleeping', 'releasing_helper')
-            if self.legacy_activation and self.activation_journal.is_file():
-                enabled = True
-            if enabled != self.hotkey_enabled:
-                self.hotkey_enabled = enabled
-                self.hotkey.set_enabled(enabled)
-            self.state['hotkey_deferred'] = not enabled
             if getattr(self, "tray", None):
                 self.state["tray_registered"] = self.tray.registered
                 self.state["tray_icon_custom"] = self.tray.icon_loaded
@@ -468,63 +452,35 @@ class Bridge:
             if not self.busy:
                 self.close()
             return
-        if action in BIND_ACTIONS:
-            self.request_binding(action, command_id)
-            return
         with self.lock:
-            connecting = self.state.get('connection_state') != 'ready'
-            if (self.closing or self.pending_request
-                    or (self.busy and self.state.get('phase') not in ('reconnecting', 'releasing_helper'))):
-                self.ack(command_id, "ignored_busy", "当前过渡尚未结束。")
+            if self.closing or self.pending_request:
+                self.ack(command_id, 'ignored_busy', '当前过渡尚未结束。')
                 return
-            if connecting:
-                if self.state.get('connection_state') == 'awaiting_helper':
-                    self.ack(command_id, 'cancelled', '请在控制室的伙伴状态中绑定专用窗口。')
+            if self.busy:
+                if self.state.get('phase') in ('reconnecting', 'releasing_helper'):
+                    self.queue_switch(action, command_id)
+                else:
+                    self.ack(command_id, 'ignored_busy', '当前过渡尚未结束。')
+                return
+            intent = None
+            helper = background.owned_window()
+            last_error = self.state.get('error') or ''
+            replace = helper and last_error.startswith(('后台导航没有响应', '后台个人资料菜单'))
+            if not helper or replace:
+                if time.monotonic() < self.next_manual_reconnect:
+                    self.ack(command_id, 'ignored_busy', '请稍等后再按 F8。')
                     return
-                self.queue_switch(action, command_id)
-                return
+                intent = background.capture_setup_intent()
+                if intent is None:
+                    message = '还未连接。请切回 Codex，在前台按一次快捷键。'
+                    self.update(pending_switch_notice=message)
+                    self.ack(command_id, 'cancelled', message)
+                    return
+                self.next_manual_reconnect = time.monotonic() + 3
+                intent['replace_helper'] = bool(replace)
             self.busy = True
-            self.update(phase="preparing", native_switch_confirmed=False, pending_switch_notice=None)
-        threading.Thread(target=self.worker, args=(action, command_id), daemon=True).start()
-
-    def request_binding(self, action, command_id):
-        with self.lock:
-            if self.closing or self.busy:
-                self.ack(command_id, 'ignored_busy', '当前操作尚未结束，请稍后重试绑定。')
-                return
-            if action == 'prepare-helper':
-                try:
-                    self.helper_binding = background.begin_binding()
-                    self.update(helper_setup_pending=True, helper_setup_error=None)
-                    self.ack(command_id, 'completed', '请新建专用窗口，打开宠物设置页后回来确认绑定。')
-                except Exception as error:
-                    self.ack(command_id, 'failed', str(error))
-                return
-            if not self.helper_binding or time.time() >= self.helper_binding['expires']:
-                self.helper_binding = None
-                self.update(helper_setup_pending=False, helper_setup_error='绑定已过期，请重新准备。')
-                self.ack(command_id, 'cancelled', '绑定已过期，请重新准备。')
-                return
-            self.busy = True
-            self.update(phase='binding_helper', connection_state='binding_helper')
-            threading.Thread(target=self.bind_helper, args=(self.helper_binding, command_id), daemon=True).start()
-
-    def bind_helper(self, binding, command_id):
-        try:
-            isolated_calls.run([str(Path(sys.executable).with_name('python.exe')), str(APP_DIR / 'background_uia.py'),
-                                'bind', '--binding', json.dumps(binding)], timeout=12)
-            self.helper_binding = None
-            self.update(phase='starting', connection_state='disconnected',
-                        helper_setup_pending=False, helper_setup_error=None)
-            self.ack(command_id, 'completed', '辅助窗口已绑定，正在检查 F8 就绪状态。')
-        except Exception as error:
-            self.update(phase='awaiting_helper', connection_state='awaiting_helper', helper_setup_error=str(error))
-            self.ack(command_id, 'failed', str(error))
-        finally:
-            with self.lock:
-                self.next_health_check = 0
-                self.next_reconnect = 0
-                self.busy = False
+            self.update(phase='preparing', native_switch_confirmed=False, pending_switch_notice=None)
+        threading.Thread(target=self.worker, args=(action, command_id, intent), daemon=True).start()
 
     def queue_switch(self, action, command_id):
         now = time.monotonic()
@@ -540,11 +496,6 @@ class Bridge:
             message = '请先在 Codex 显示一只已绑定的宠物，再按快捷键。'
             self.update(pending_switch_notice=message)
             self.ack(command_id, 'cancelled', message)
-        if not self.busy and now >= self.next_manual_reconnect:
-            # A user request may shorten error backoff, with its own rate limit.
-            self.next_manual_reconnect = now + 3
-            self.next_reconnect = 0
-            self.root.after(0, self.reconnect_if_needed)
 
     def cancel_pending_switch(self, message):
         pending = self.pending_request
@@ -577,7 +528,7 @@ class Bridge:
                 action = 'take-off' if self.state['form'] == 'feibi' else 'put-on'
             self.request(action, pending.command_id)
 
-    def worker(self, action, command_id):
+    def worker(self, action, command_id, intent=None):
         try:
             # COM calls cannot reliably be cancelled in a Python thread. Keep
             # both discovery and invocation outside the long-lived hotkey host.
@@ -592,7 +543,7 @@ class Bridge:
             self.progress_path = progress_path
             command += ['--progress-token', token]
             worker_started = time.perf_counter()
-            result = self.pool.run(action, token, timeout=35 if not action else 22)
+            result = self.pool.run(action, token, timeout=32 if intent else (35 if not action else 22), intent=intent)
             if action:
                 result['worker_total_ms'] = round((time.perf_counter()-worker_started)*1000, 1)
                 result['last_switch_failure'] = None
@@ -618,6 +569,9 @@ class Bridge:
                 hide_cg()
                 recovery_journal.recover(cg_visible())
                 background.release_helper_focus()
+                if intent and background.MENU_LEASE.is_file():
+                    isolated_calls.run([str(Path(sys.executable).with_name('python.exe')),
+                                        str(APP_DIR / 'background_uia.py'), 'cleanup-menu'], timeout=5)
             except Exception:
                 logging.exception('Isolated worker recovery failed; heartbeat will retry')
             self.reconnect_failures = getattr(self, 'reconnect_failures', 0) + 1
@@ -660,8 +614,7 @@ class Bridge:
 
     def release_idle_helper(self):
         try:
-            # Keep the user-bound window. Closing it would require another
-            # explicit binding, rather than a transparent F8 wakeup.
+            # Keep the existing connection, and only release the prewarmed worker.
             self.pool.close()
             self.update(phase='sleeping', connection_state='sleeping', memory_saving_error=None)
         except Exception as error:
@@ -673,7 +626,8 @@ class Bridge:
                 self.busy = False
 
     def reconnect_if_needed(self):
-        if self.closing or self.busy or time.monotonic() < self.next_reconnect:
+        if (self.closing or self.busy or self.state.get('phase') == 'error'
+                or time.monotonic() < self.next_reconnect):
             return
         if (self.state.get('connection_state') == 'sleeping' and self.state.get('memory_saving')
                 and not self.pending_request):
@@ -753,7 +707,7 @@ class Bridge:
                 continue
             if valid_command(command, path.stem, ACTIONS):
                 self.request_meta[path.stem] = command
-                if command['action'] in (SHUTDOWN_ACTIONS | BIND_ACTIONS) and not claim(RUNTIME / 'bridge-decisions', command):
+                if command['action'] in SHUTDOWN_ACTIONS and not claim(RUNTIME / 'bridge-decisions', command):
                     self.ack(path.stem, 'cancelled', '退出请求已取消或过期。')
                 else:
                     self.request(command["action"], path.stem)
@@ -777,9 +731,6 @@ class Bridge:
                     except (OSError, ValueError) as error:
                         self.update(settings_error=str(error))
                 if not self.busy:
-                    if self.helper_binding and time.time() >= self.helper_binding['expires']:
-                        self.helper_binding = None
-                        self.update(helper_setup_pending=False, helper_setup_error='绑定已过期，请重新准备。')
                     if time.monotonic() >= self.next_maintenance:
                         active = set(self.request_meta)
                         if self.pending_request and self.pending_request.command_id:
@@ -862,9 +813,9 @@ def main():
                     def report(**data):
                         path = RUNTIME / ('progress-'+token+'.json')
                         write_json(path, control.read_json(path) | data | {'token':token})
-                    if action is None or not background.owned_window():
+                    if action is None or request.get('intent') or not background.owned_window():
                         report(stage='background_page')
-                        background.prepare()
+                        background.prepare(intent=request.get('intent') if action else None)
                     if not action:
                         report(stage='cg_player')
                     ensure_cg()

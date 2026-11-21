@@ -352,8 +352,6 @@ class ControlRoom:
             message=state['hotkey_error']
         elif state.get('hotkey')==requested and state.get('hotkey_registered'):
             message = requested + ' 已注册。' + ('可以切换宠物。' if state.get('switch_ready') else '等待宠物后台连接。')
-        elif state.get('hotkey') == requested and state.get('hotkey_deferred'):
-            message = requested + ' 已保存，连接就绪后才占用该快捷键。'
         else:
             message='后台尚未确认，请查看状态与诊断。'
         self.feedback=message[:100]
@@ -386,11 +384,8 @@ class ControlRoom:
         self.round(255,232,45,45,18,'#EDF5EF')
         self.text(278,255,'✓' if ready else '·',25,C['green'] if ready else C['muted'],anchor='center',latin=True)
         self.text(318,230,tray.status_label(state),25,bold=True)
-        if state.get('helper_setup_pending'):
-            message = state.get('helper_setup_error') or '新建专用 Codex 窗口，在新窗口打开宠物设置，再回这里确认。'
-            self.text(318,271,message,15,C['muted'],width=310)
-        elif state.get('connection_state') == 'awaiting_helper':
-            self.text(318,271,'首次使用或 Codex 重启后，需绑定专用窗口。',15,C['muted'],width=310)
+        if state.get('connection_state') == 'awaiting_helper':
+            self.text(318,271,'请在 Codex 前台按 F8 连接一次。',15,C['muted'],width=310)
         elif state.get('pending_switch'):
             self.text(318,271,'本次请求正在等待连接',15,C['muted'])
         elif state.get('pending_switch_notice'):
@@ -409,11 +404,8 @@ class ControlRoom:
             self.text(255,y,label,18,C['muted']);self.text(632,y,value,19,anchor='ne')
             if i<3:self.c.create_line(255,y+34,633,y+34,fill='#F0EAF5')
         self.button(232,582,170,43,'刷新状态',self.draw)
-        if state.get('helper_setup_pending'):
-            self.button(416,582,242,43,'确认绑定新窗口',lambda:self.bind_helper('bind-helper'),primary=True)
-            return
         if state.get('connection_state') in ('awaiting_helper', 'disconnected'):
-            self.button(416,582,242,43,'准备绑定辅助窗口',lambda:self.bind_helper('prepare-helper'),primary=True)
+            self.text(436,591,'回到 Codex 后按 F8',17,C['muted'])
             return
         target = {'feibi':'take-off','feiba':'put-on'}.get(state.get('form'), 'toggle')
         action_label = '戴帽 · 菲比' if target == 'put-on' else '摘帽 · 菲八'
@@ -429,18 +421,6 @@ class ControlRoom:
         self.c.itemconfigure(self.connection_badge, text='●  '+text,
                              fill=C['green'] if ready else C['muted'])
 
-    def bind_helper(self, action):
-        def done(result, error):
-            self.draw()
-            if error or result.returncode:
-                try:
-                    error = error or json.loads(result.stdout).get('message')
-                except ValueError:
-                    pass
-                self.notice((error or '绑定失败，请检查专用窗口。')[:32])
-        self.async_call([str(Path(sys.executable).with_name('python.exe')),
-                         str(HERE/'bridge_control.py'), action], done)
-
     def update_page(self):
         self.heading('让陪伴顺顺利利','更新与诊断，都在这里安心查看。')
         self.card(232,204,426,159)
@@ -455,7 +435,7 @@ class ControlRoom:
         except (OSError, ValueError):
             memory_saving = False
         self.text(255,454,'闲置 5 分钟后释放预热进程',15,C['muted'])
-        self.text(255,479,'保留绑定窗口，下次按键时恢复',15,C['muted'])
+        self.text(255,479,'保留已有连接，下次按键时恢复',15,C['muted'])
         self.button(504,447,130,37,'省内存 · '+('开' if memory_saving else '关'),
                     lambda:self.set_memory_saving(not memory_saving),small=True)
         self.button(490,504,144,35,'查看诊断详情',self.open_detail,small=True)
@@ -614,8 +594,7 @@ class ControlRoom:
         if self.root.state()!='withdrawn' and self.tab!=0 and not self.detail and not self.busy and not self.resizing:
             state=read('bridge-status.json');updater=read('update-status.json')
             snapshot=tuple(state.get(k) for k in ('phase','form','hotkey','version','error','last_switch_failure',
-                'hotkey_registered','hotkey_error','connection_state','switch_ready','pending_switch','pending_switch_notice',
-                'helper_setup_pending','helper_setup_error'))+tuple(updater.get(k) for k in ('phase','installed_version','latest_version','error'))
+                'hotkey_registered','hotkey_error','connection_state','switch_ready','pending_switch','pending_switch_notice'))+tuple(updater.get(k) for k in ('phase','installed_version','latest_version','error'))
             if snapshot!=self.last_snapshot:
                 self.last_snapshot=snapshot
                 self.draw()

@@ -12,7 +12,7 @@ KEYS = {
     'pets': 'settings.nav.miniAndPets',
 }
 FALLBACK = {
-    'new_window': ['新建窗口', 'New Window'],
+    'new_window': ['新窗口', '新建窗口', '新增视窗', 'New Window'],
     'profile': ['打开个人资料菜单', 'Open profile menu'],
     'settings': ['设置', 'Settings'],
     'pets': ['迷你界面和智能伙伴', 'Mini and pets', 'Mini & pets'],
@@ -35,7 +35,7 @@ def labels():
         if cache.exists():
             data = json.loads(cache.read_text(encoding='utf-8'))
             if data.get('stamp') == stamp:
-                _labels = data['labels']
+                _labels = {key: sorted(values | set(data['labels'].get(key, ()))) for key, values in result.items()}
                 return _labels
         def files(tree):
             for name, item in tree.items():

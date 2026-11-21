@@ -40,6 +40,7 @@ class ReconnectReadinessTests(unittest.TestCase):
     def test_no_automatic_worker_at_start_or_after_restoring_without_helper(self):
         service = self.service()
         service.next_reconnect = 0
+        service.state['phase'] = 'starting'
         windows = Mock()
         windows.main.return_value = SimpleNamespace(hwnd=11, pid=42)
         windows.user32.IsIconic.side_effect = [True, False]
@@ -56,17 +57,36 @@ class ReconnectReadinessTests(unittest.TestCase):
             thread.assert_not_called()
             windows.user32.SetForegroundWindow.assert_not_called()
 
-    def test_press_during_backoff_queues_one_switch_and_wakes_reconnect(self):
+    def test_explicit_press_starts_only_one_connection_attempt(self):
         service = self.service()
-        with patch.object(bridge.time, 'monotonic', return_value=1), \
-             patch.object(bridge.native, 'preferences', return_value={'selected-avatar-id':'pet_original'}):
+        intent = {'hwnd': 11}
+        with patch.object(bridge.time, 'monotonic', return_value=5), \
+             patch.object(bridge.background, 'owned_window', return_value=None), \
+             patch.object(bridge.background, 'capture_setup_intent', return_value=intent) as capture, \
+             patch.object(bridge.threading, 'Thread') as thread:
             service.request('toggle')
-            request = service.pending_request
             service.request('toggle')
-        self.assertIs(service.pending_request, request)
-        self.assertTrue(service.state['pending_switch'])
-        self.assertEqual(service.next_reconnect, 0)
-        service.root.after.assert_called_once_with(0, service.reconnect_if_needed)
+            capture.assert_called_once()
+            thread.assert_called_once_with(target=service.worker, args=('toggle', None, intent), daemon=True)
+            thread.return_value.start.assert_called_once()
+            self.assertTrue(service.state['hotkey_registered'])
+
+    def test_missing_connection_in_other_app_never_starts_menu_worker(self):
+        service = self.service()
+        with patch.object(bridge.background, 'owned_window', return_value=None), \
+             patch.object(bridge.background, 'capture_setup_intent', return_value=None), \
+             patch.object(bridge.threading, 'Thread') as thread:
+            service.request('toggle')
+        thread.assert_not_called()
+        self.assertEqual(service.ack.call_args.args[1], 'cancelled')
+        self.assertTrue(service.state['hotkey_registered'])
+
+    def test_background_does_not_retry_after_failure(self):
+        service = self.service()
+        service.next_reconnect = 0
+        with patch.object(bridge.threading, 'Thread') as thread:
+            service.reconnect_if_needed()
+        thread.assert_not_called()
 
     def test_ready_releases_one_absolute_switch(self):
         service = self.service()
@@ -117,11 +137,12 @@ class ReconnectReadinessTests(unittest.TestCase):
             service.reconnect_if_needed()
             windows.assert_not_called()
 
-    def test_sleeping_mode_honors_one_wakeup_with_a_bounded_deadline(self):
+    def test_sleeping_mode_reuses_the_existing_connection_on_one_press(self):
         service = self.service()
         service.state.update(connection_state='sleeping', phase='sleeping', memory_saving=True)
-        with patch.object(bridge.time, 'monotonic', return_value=1000), \
-             patch.object(bridge.native, 'preferences', return_value={'selected-avatar-id':'pet_original'}):
+        with patch.object(bridge.background, 'owned_window', return_value=object()), \
+             patch.object(bridge.background, 'capture_setup_intent') as capture, \
+             patch.object(bridge.threading, 'Thread') as thread:
             service.request('toggle')
-        self.assertEqual(service.pending_request.deadline, 1025)
-        service.root.after.assert_called_once_with(0, service.reconnect_if_needed)
+        capture.assert_not_called()
+        thread.assert_called_once_with(target=service.worker, args=('toggle', None, None), daemon=True)

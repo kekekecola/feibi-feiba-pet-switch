@@ -49,11 +49,11 @@ class WarmWorker:
         if message != {'ready':True}:
             raise WorkerError('工作进程初始化失败')
 
-    def run(self, action, progress_token, timeout):
+    def run(self, action, progress_token, timeout, intent=None):
         try:
             self.start()
             job = uuid.uuid4().hex
-            self.process.stdin.write(json.dumps(dict(job=job, action=action, token=progress_token))+'\n')
+            self.process.stdin.write(json.dumps(dict(job=job, action=action, token=progress_token, intent=intent))+'\n')
             self.process.stdin.flush()
             message = self.messages.get(timeout=timeout)
             if message.get('job') != job:

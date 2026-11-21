@@ -28,7 +28,7 @@ def main():
     if sys.stdout:
         sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("status", "toggle", "take-off", "put-on", "quit", "quit-for-update", "prepare-helper", "bind-helper"))
+    parser.add_argument("action", choices=("status", "toggle", "take-off", "put-on", "quit", "quit-for-update"))
     parser.add_argument("--timeout", type=float, default=25)
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 120:

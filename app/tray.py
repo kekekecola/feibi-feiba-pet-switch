@@ -25,7 +25,7 @@ def status_label(state):
     return {'preparing':'检查宠物卡片', 'selecting_native':'确认原生宠物', 'transition':'正在切换',
             'restoring':'恢复原生', 'recovering_native':'恢复原生',
             'reconnecting':'正在连接', 'waiting_gpt':'等待 Codex 启动', 'waiting_window':'等待打开 Codex',
-            'awaiting_helper':'等待绑定辅助窗口', 'binding_helper':'正在绑定',
+            'awaiting_helper':'在 Codex 按 F8 连接',
             'sleeping':'省内存待机', 'releasing_helper':'释放预热进程',
             'error':'连接或切换失败', 'stopped':'已退出'}.get(phase, '准备连接')
 

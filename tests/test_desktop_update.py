@@ -250,18 +250,6 @@ class DesktopUpdateTests(unittest.TestCase):
         xml=manager.scheduler_xml(home,home/'python.exe','test','run').replace('" run</Arguments>','" update</Arguments>')
         return {'exists':True, 'running':running, 'xml':xml}
 
-    def test_unready_switcher_does_not_reserve_shortcuts(self):
-        hotkey = GlobalF8(queue.Queue(), enabled=False)
-        user = Mock()
-        hotkey.apply_request(user, 'hotkey', 'F7')
-        user.RegisterHotKey.assert_not_called()
-        hotkey.apply_request(user, 'enabled', True)
-        user.RegisterHotKey.assert_called_once()
-        self.assertEqual(hotkey.active, 'F7')
-        hotkey.apply_request(user, 'enabled', False)
-        user.UnregisterHotKey.assert_called_once_with(None, hotkey.active_id)
-        self.assertFalse(hotkey.registered)
-
     def test_retirement_only_deletes_the_old_owned_task_once(self):
         with tempfile.TemporaryDirectory() as folder:
             home=Path(folder).resolve()

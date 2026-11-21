@@ -45,8 +45,7 @@ def collect():
     state = control.read_json(RUNTIME / 'bridge-status.json')
     keys = ('version', 'phase', 'connection_state', 'shutdown_source', 'hotkey', 'hotkey_registered', 'hotkey_error',
             'tray_registered', 'tray_icon_custom', 'tray_error', 'settings_error', 'update_error', 'form', 'native_visible', 'cg_visible', 'native_switch_confirmed', 'error', 'control_details', 'timings_ms',
-            'switch_ready', 'hotkey_deferred', 'pending_switch', 'pending_switch_notice', 'stage', 'memory_saving', 'memory_saving_error',
-            'helper_setup_pending', 'helper_setup_error')
+            'switch_ready', 'pending_switch', 'pending_switch_notice', 'stage', 'memory_saving', 'memory_saving_error')
     report = dict(version=VERSION, python=platform.python_version(), platform=platform.system(),
                   status={key:state.get(key) for key in keys},
                   heartbeat_fresh=time.time() - state.get('updated_at', 0) < 6,
