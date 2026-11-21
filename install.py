@@ -175,7 +175,6 @@ def main():
     parser.add_argument('action', choices=('install', 'update', 'uninstall', 'configure', 'verify', 'check-pets'))
     parser.add_argument('--skip-pets', action='store_true', help='Use an existing pair instead of installing local copies')
     parser.add_argument('--no-start', action='store_true', help='Register logon task without starting now')
-    parser.add_argument('--enable-auto-updates', action='store_true', help='Resume automatic updates after opting out')
     parser.add_argument('--dry-run', action='store_true', help='Validate assets and show plan without modifying this machine')
     parser.add_argument('--feibi-id')
     parser.add_argument('--feiba-id')
@@ -217,7 +216,7 @@ def main():
             raise RuntimeError('已检测到一只现有宠物。请确认两只宠物的 ID 后使用 install --skip-pets，避免重新导入。')
     if args.dry_run:
         print(json.dumps(dict(action='update' if updating else args.action, task=TASK, pets_destination=None if args.skip_pets else str(home / 'pets'),
-                              skip_pets=args.skip_pets, automatic_updates='once_per_codex_launch'), ensure_ascii=False))
+                              skip_pets=args.skip_pets, automatic_updates=False), ensure_ascii=False))
         return
     if os.name != 'nt' or sys.version_info < (3, 11):
         raise RuntimeError('Windows and Python 3.11+ are required.')
@@ -231,7 +230,7 @@ def main():
         print('Role mapping saved. Restart the F8 service to load it.')
         return
     if mode == 'managed':
-        from manager import UpdateLock, ensure_updater, pointer, register_main_task, status, update_from_folder
+        from manager import pointer, register_main_task, retire_update_task_safely, update_from_folder
         restore_main = not snapshot.get('exists')
         if restore_main:
             old_version = pointer(previous_root)['version']
@@ -240,10 +239,7 @@ def main():
                   else update_from_folder(previous_root, ROOT))
         if restore_main and not args.no_start and result['version'] == old_version:
             command(['schtasks', '/Run', '/TN', TASK], timeout=30)
-        with UpdateLock(previous_root, wait=20):
-            if args.enable_auto_updates:
-                (previous_root / 'updates-disabled').unlink(missing_ok=True)
-            status(previous_root, automatic_updates=ensure_updater(previous_root))
+        retire_update_task_safely(previous_root)
         print('Switcher version ' + result['version'] + '. Your existing pets are preserved.')
         return
     apply_install(args, home, previous_root, inspection)
@@ -251,7 +247,7 @@ def main():
         print('Program installed. Keep using your existing pets and press F8 to switch.')
     else:
         print('First-time installation complete. Refresh Pets in Codex and select either pet to use F8.')
-    print('Automatic updates check once when you open Codex.')
+    print('Updates are manual. Download the latest release and run the update script.')
 
 
 if __name__ == '__main__':

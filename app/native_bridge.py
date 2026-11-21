@@ -351,8 +351,6 @@ class Bridge:
         self.next_manual_reconnect = 0
         self.next_health_check = 0
         self.next_maintenance = 0
-        self.update_client_pid = None
-        self.update_client_session = None
         self.last_activity = time.monotonic()
         self.state = {"running": True, "pid": os.getpid(), "phase": "starting",
                       "connection_state": "starting", "pending_switch": False,
@@ -368,7 +366,14 @@ class Bridge:
         except (OSError, ValueError) as error:
             desired_hotkey, settings_error = 'F8', str(error)
             self.state['memory_saving'] = False
-        self.hotkey = GlobalF8(self.hotkey_events, desired_hotkey, settings.last_good())
+        managed_home = os.environ.get('FEIBI_SWITCH_HOME')
+        self.activation_journal = Path(managed_home) / 'pending-update.json' if managed_home else None
+        activation = control.read_json(self.activation_journal) if self.activation_journal else {}
+        # Older installed updaters expect a registered hotkey during handoff.
+        # Honor that short health check, then apply our normal ownership rule.
+        self.legacy_activation = bool(activation.get('previous') and not activation.get('accepts_deferred_hotkey'))
+        self.hotkey_enabled = self.legacy_activation
+        self.hotkey = GlobalF8(self.hotkey_events, desired_hotkey, settings.last_good(), enabled=self.hotkey_enabled)
         self.settings_stamp = None
         self.progress_path = None
         self.tray = tray.Tray(self.hotkey_events)
@@ -383,6 +388,13 @@ class Bridge:
         with self.lock:
             self.state.update(changes)
             self.state['switch_ready'] = tray.pet_ready(self.state) and self.state.get('phase') == 'idle'
+            enabled = self.state.get('connection_state') in ('ready', 'sleeping', 'releasing_helper')
+            if self.legacy_activation and self.activation_journal.is_file():
+                enabled = True
+            if enabled != self.hotkey_enabled:
+                self.hotkey_enabled = enabled
+                self.hotkey.set_enabled(enabled)
+            self.state['hotkey_deferred'] = not enabled
             if getattr(self, "tray", None):
                 self.state["tray_registered"] = self.tray.registered
                 self.state["tray_icon_custom"] = self.tray.icon_loaded
@@ -400,14 +412,9 @@ class Bridge:
             webbrowser.open('https://github.com/kekekecola/feibi-feiba-pet-switch#readme')
             return
         if action == 'update':
-            if not os.environ.get('FEIBI_SWITCH_HOME'):
-                self.update(update_error='请运行新版“更新程序.cmd”接入自动更新。')
-                action = 'diagnose'
-            else:
-                result = subprocess.run(['schtasks', '/Run', '/TN', 'FeibiFeibaPetSwitchUpdate'],
-                                        capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-                self.update(update_error=None if result.returncode == 0 else '无法启动更新任务')
-                return
+            import webbrowser
+            webbrowser.open('https://github.com/kekekecola/feibi-feiba-pet-switch/releases/latest')
+            return
         page = {'settings':'hotkeys','diagnose':'diagnostics'}.get(action)
         self.open_room(page)
 
@@ -668,14 +675,9 @@ class Bridge:
     def reconnect_if_needed(self):
         if self.closing or self.busy or time.monotonic() < self.next_reconnect:
             return
-        sleeping = (self.state.get('connection_state') == 'sleeping' and self.state.get('memory_saving')
-                    and not self.pending_request)
-        if sleeping:
-            if not os.environ.get('FEIBI_SWITCH_HOME'):
-                return
-            if (self.update_client_pid and
-                    native.Windows().process_session(self.update_client_pid) == self.update_client_session):
-                return
+        if (self.state.get('connection_state') == 'sleeping' and self.state.get('memory_saving')
+                and not self.pending_request):
+            return
         if (self.state.get('connection_state') in ('ready','awaiting_helper') and not recovery_journal.JOURNAL.exists()
                 and time.monotonic()<self.next_health_check):
             return
@@ -694,12 +696,7 @@ class Bridge:
                 windows = native.Windows()
                 main_window = windows.main()
             except RuntimeError:
-                if sleeping:
-                    return
                 self.update(phase="waiting_gpt", connection_state="waiting_gpt", native_switch_confirmed=False, error=None)
-                return
-            self.observe_client_launch(windows, main_window.pid)
-            if sleeping:
                 return
             if not helper:
                 self.update(phase='awaiting_helper', connection_state='awaiting_helper', native_switch_confirmed=False, error=None)
@@ -712,29 +709,6 @@ class Bridge:
             logging.exception("Connection check failed")
             self.next_reconnect = time.monotonic() + 8
             self.update(connection_state="disconnected", error=str(error))
-
-    def observe_client_launch(self, windows, pid):
-        if not os.environ.get('FEIBI_SWITCH_HOME'):
-            return
-        session = windows.process_session(pid)
-        if not session or session == self.update_client_session:
-            return
-        self.update_client_pid = pid
-        self.update_client_session = session
-        if control.read_json(RUNTIME / 'auto-update-session.json').get('session') == session:
-            return
-        threading.Thread(target=self.schedule_launch_update, args=(session,), daemon=True).start()
-
-    def schedule_launch_update(self, session):
-        try:
-            subprocess.run([str(Path(sys.executable).with_name('python.exe')),
-                            str(APP_DIR.parent / 'manager.py'), 'update-on-client-launch', session,
-                            '--home', os.environ['FEIBI_SWITCH_HOME']],
-                           check=True, capture_output=True, timeout=50, creationflags=subprocess.CREATE_NO_WINDOW)
-            self.update(update_error=None)
-        except (OSError, subprocess.SubprocessError):
-            logging.exception('Could not schedule the Codex launch update')
-            self.update(update_error='启动时未能检查更新，可在控制室手动检查。')
 
     def ack(self, command_id, result, message):
         if command_id:

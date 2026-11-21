@@ -165,46 +165,46 @@ class DesktopUpdateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 manager.pointer(home)
 
-    def test_older_release_does_not_downgrade(self):
+    def test_older_local_release_does_not_downgrade(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            root = Path(folder)
+            home = root/'managed'
             current = initial_pointer(home)
-            with patch.object(manager, 'download', return_value=json.dumps({'tag_name':'v1.1.0'}).encode()), \
-                 patch.object(manager, 'activate') as activate:
-                self.assertEqual(manager.update_locked(home), current)
+            source = root/'bundle'
+            source.mkdir()
+            (source/'VERSION').write_text('1.1.0',encoding='utf-8')
+            with patch.object(manager,'verify_source'), patch.object(manager,'activate') as activate:
+                self.assertEqual(manager.update_from_folder(home,source),current)
                 activate.assert_not_called()
 
-    def test_network_failure_leaves_current_pointer(self):
+    def test_invalid_local_release_leaves_current_pointer(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
             current = initial_pointer(home)
-            with patch.object(manager, 'download', side_effect=OSError('offline')), \
-                 patch.object(manager, 'stop') as stop:
-                with self.assertRaises(OSError):
-                    manager.update_locked(home)
+            with patch.object(manager,'verify_source',side_effect=ValueError('bad assets')), \
+                 patch.object(manager,'stop') as stop:
+                with self.assertRaises(ValueError):
+                    manager.update_from_folder(home,home/'bad')
                 stop.assert_not_called()
             self.assertEqual(manager.pointer(home), current)
 
-    def test_valid_update_prepares_before_activation(self):
-        payload, digest = make_archive()
-        release = dict(tag_name='v1.3.0', assets=[dict(name='feibi-feiba-pet-switch-v1.3.0-windows.zip',
-            state='uploaded', browser_download_url='https://github.com/kekekecola/feibi-feiba-pet-switch/releases/download/v1.3.0/feibi-feiba-pet-switch-v1.3.0-windows.zip',
-            size=len(payload), digest=digest)])
+    def test_local_update_prepares_before_activation(self):
+        payload,digest=make_archive()
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
-            current = initial_pointer(home)
-            calls = []
+            root=Path(folder).resolve()
+            home=root/'managed'
+            current=initial_pointer(home)
+            source=manager.extract_archive(payload,root/'bundle',digest)
+            events=[]
             def prepare(*args):
-                calls.append('prepare')
-                return home / current['python']
+                events.append('prepare')
+                return home/current['python']
             def activate(*args):
-                calls.append('activate')
+                events.append('activate')
                 return {'version':'1.3.0'}
-            with patch.object(manager, 'download', side_effect=[json.dumps(release).encode(), payload]), \
-                 patch.object(manager, 'prepare_python', side_effect=prepare), \
-                 patch.object(manager, 'activate', side_effect=activate):
-                self.assertEqual(manager.update_locked(home)['version'], '1.3.0')
-            self.assertEqual(calls, ['prepare','activate'])
+            with patch.object(manager,'prepare_python',side_effect=prepare), patch.object(manager,'activate',side_effect=activate):
+                self.assertEqual(manager.update_from_folder(home,source)['version'],'1.3.0')
+            self.assertEqual(events,['prepare','activate'])
 
     def test_failed_health_check_rolls_back_pointer(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -246,42 +246,57 @@ class DesktopUpdateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 manager.version(value)
 
-    def test_update_task_has_no_scheduled_trigger(self):
-        xml = manager.scheduler_xml(Path('C:/example'), Path('C:/example/python.exe'), 'S-1-test', 'update')
-        self.assertNotIn('Trigger', xml)
-        self.assertIn('PT20M', xml)
-        self.assertIn('InteractiveToken', xml)
-        self.assertIn('LogonTrigger', manager.scheduler_xml(Path('C:/example'), Path('C:/example/python.exe'), 'S-1-test', 'run'))
+    def legacy_update_task(self, home, running=False):
+        xml=manager.scheduler_xml(home,home/'python.exe','test','run').replace('" run</Arguments>','" update</Arguments>')
+        return {'exists':True, 'running':running, 'xml':xml}
 
-    def test_launch_updates_once_per_process_instance(self):
-        with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
-            with patch('install_transaction.task_snapshot', return_value={'exists':False}), \
-                 patch.object(manager, 'ensure_updater', return_value=True), patch.object(manager, 'run') as run:
-                manager.update_on_client_launch(home, '42:100')
-                manager.update_on_client_launch(home, '42:100')  # Bridge restarted.
-                manager.update_on_client_launch(home, '42:200')  # PID was reused.
-            self.assertEqual(run.call_count, 2)
+    def test_unready_switcher_does_not_reserve_shortcuts(self):
+        hotkey = GlobalF8(queue.Queue(), enabled=False)
+        user = Mock()
+        hotkey.apply_request(user, 'hotkey', 'F7')
+        user.RegisterHotKey.assert_not_called()
+        hotkey.apply_request(user, 'enabled', True)
+        user.RegisterHotKey.assert_called_once()
+        self.assertEqual(hotkey.active, 'F7')
+        hotkey.apply_request(user, 'enabled', False)
+        user.UnregisterHotKey.assert_called_once_with(None, hotkey.active_id)
+        self.assertFalse(hotkey.registered)
 
-    def test_running_updater_is_not_launched_a_second_time(self):
+    def test_retirement_only_deletes_the_old_owned_task_once(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
-            with patch('install_transaction.task_snapshot', return_value={'exists':True,'running':True}), \
-                 patch.object(manager, 'ensure_updater', return_value=True), patch.object(manager, 'run') as run:
-                manager.update_on_client_launch(home, '42:100')
-                manager.update_on_client_launch(home, '42:100')
-            run.assert_not_called()
+            home=Path(folder).resolve()
+            with patch('install_transaction.task_snapshot',return_value=self.legacy_update_task(home)) as snapshot, \
+                 patch.object(manager,'run') as run:
+                self.assertTrue(manager.retire_update_task(home))
+                self.assertTrue(manager.retire_update_task(home))
+                snapshot.assert_called_once_with(manager.UPDATE_TASK)
+                self.assertEqual(run.call_args.args[0],['schtasks','/Delete','/TN',manager.UPDATE_TASK,'/F'])
+            self.assertTrue((home/'updates-disabled').exists())
 
-    def test_legacy_timer_is_replaced_by_an_on_demand_update_task(self):
+    def test_cleanup_leaves_a_running_old_update_alone(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder).resolve()
-            current = initial_pointer(home)
-            xml = manager.scheduler_xml(home, home/current['python'], 'test', 'update')
-            periodic = xml.replace('<Principals>', '<Triggers><TimeTrigger /></Triggers><Principals>')
-            with patch('install_transaction.task_snapshot', return_value={'exists':True,'xml':periodic}), \
-                 patch.object(manager, 'user_sid', return_value='test'), patch.object(manager, 'register') as register:
-                self.assertTrue(manager.ensure_updater(home))
-            self.assertEqual(register.call_args.args, (manager.UPDATE_TASK, xml))
+            home=Path(folder).resolve()
+            with patch('install_transaction.task_snapshot',return_value=self.legacy_update_task(home, running=True)), \
+                 patch.object(manager,'run') as run:
+                self.assertFalse(manager.retire_update_task(home))
+                run.assert_not_called()
+            self.assertFalse((home/'manual-updates-v1').exists())
+
+    def test_cleanup_leaves_a_different_installation_alone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home=Path(folder).resolve()
+            with patch('install_transaction.task_snapshot',return_value=self.legacy_update_task(home/'other')), \
+                 patch.object(manager,'run') as run:
+                with self.assertRaisesRegex(RuntimeError,'different installation'):
+                    manager.retire_update_task(home)
+                run.assert_not_called()
+
+    def test_obsolete_automatic_command_does_not_run_an_update(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for action in ('update','update-on-client-launch'):
+                with patch.object(sys,'argv',['manager.py',action,'--home',folder]), patch.object(manager,'run') as run:
+                    manager.main()
+                    run.assert_not_called()
 
     def test_interrupted_update_restores_previous_pointer(self):
         with tempfile.TemporaryDirectory() as folder:

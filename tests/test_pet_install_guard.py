@@ -23,10 +23,10 @@ class PetInstallGuardTests(unittest.TestCase):
                  patch.object(install, 'task_snapshot', return_value=snapshot), \
                  patch('pet_install_guard.inspect', side_effect=AssertionError('unexpected pet inspection')), \
                  patch.object(manager, 'update_from_folder', return_value={'version': '1.6.9'}) as update, \
-                 patch.object(manager, 'ensure_updater', return_value=True) as ensure:
+                 patch.object(manager, 'retire_update_task_safely') as retire:
                 install.main()
                 update.assert_called_once_with(managed, install.ROOT)
-                ensure.assert_called_once_with(managed)
+                retire.assert_called_once_with(managed)
 
     def test_legacy_update_preserves_pets_and_migrates_runtime_preferences(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -58,9 +58,8 @@ class PetInstallGuardTests(unittest.TestCase):
                 stop.assert_called_once_with(previous/'.venv'/'Scripts'/'python.exe', previous)
                 configure.assert_not_called()
                 install_pets.assert_not_called()
-                updater_task = register.call_args_list[1].args
-                self.assertEqual(updater_task[0], manager.UPDATE_TASK)
-                self.assertNotIn('Trigger', updater_task[1])
+                register.assert_called_once()
+                self.assertEqual(register.call_args.args[0], manager.TASK)
             self.assertEqual((managed/'runtime'/'settings.json').read_text(), 'existing settings')
             self.assertEqual((managed/'runtime'/'pet-roles.json').read_text(), 'existing mapping')
 

@@ -352,6 +352,8 @@ class ControlRoom:
             message=state['hotkey_error']
         elif state.get('hotkey')==requested and state.get('hotkey_registered'):
             message = requested + ' 已注册。' + ('可以切换宠物。' if state.get('switch_ready') else '等待宠物后台连接。')
+        elif state.get('hotkey') == requested and state.get('hotkey_deferred'):
+            message = requested + ' 已保存，连接就绪后才占用该快捷键。'
         else:
             message='后台尚未确认，请查看状态与诊断。'
         self.feedback=message[:100]
@@ -441,18 +443,11 @@ class ControlRoom:
 
     def update_page(self):
         self.heading('让陪伴顺顺利利','更新与诊断，都在这里安心查看。')
-        state=read('update-status.json')
         self.card(232,204,426,159)
-        self.text(255,231,'版本更新',23,bold=True)
-        self.text(255,270,'已安装  v'+state.get('installed_version','1.5.1'),19)
-        if state.get('automatic_updates') is False:
-            update_label = '自动更新已关闭'
-        elif os.environ.get('FEIBI_SWITCH_HOME') or (DATA.parent/'current.json').is_file():
-            update_label = '每次打开 Codex 检查一次'
-        else:
-            update_label = '运行新版更新程序接入自动更新'
-        self.text(255,307,update_label,15,C['muted'])
-        self.button(494,260,140,42,'检查更新',self.check_update,small=True)
+        self.text(255,231,'手动更新',23,bold=True)
+        self.text(255,270,'已安装  v'+VERSION,19)
+        self.text(255,307,'下载新版后运行「更新程序.cmd」',15,C['muted'])
+        self.button(494,260,140,42,'打开下载页',self.open_download_page,small=True)
         self.card(232,385,426,171)
         self.text(255,410,'状态与诊断',23,bold=True)
         try:
@@ -539,16 +534,9 @@ class ControlRoom:
         import webbrowser
         webbrowser.open('https://github.com/kekekecola/feibi-feiba-pet-switch#readme')
 
-    def check_update(self):
-        if not os.environ.get('FEIBI_SWITCH_HOME') and not (DATA.parent/'current.json').exists():
-            self.notice('请运行新版“更新程序.cmd”接入自动更新。')
-            return
-        if read('local-theme-review.json').get('active'):
-            self.notice('本机外观试用中，暂不自动覆盖这版界面。')
-            return
-        def done(result,error):
-            self.notice('更新任务已启动，稍后刷新状态。' if not error and result.returncode==0 else '未能启动更新，请查看诊断。')
-        self.async_call(['schtasks','/Run','/TN','FeibiFeibaPetSwitchUpdate'],done)
+    def open_download_page(self):
+        import webbrowser
+        webbrowser.open('https://github.com/kekekecola/feibi-feiba-pet-switch/releases/latest')
 
     def callback_error(self,kind,error,traceback):
         logging.error('Control room callback failed',exc_info=(kind,error,traceback))

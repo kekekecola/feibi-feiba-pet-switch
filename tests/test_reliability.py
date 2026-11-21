@@ -68,7 +68,7 @@ class ReliabilityTests(unittest.TestCase):
                     if stage == 'configure':
                         raise OSError('configuration fault')
                 def register(name, xml):
-                    if stage == 'create' and name == manager.UPDATE_TASK:
+                    if stage == 'create' and name == manager.TASK:
                         raise OSError('scheduler fault')
                 def activate(*args, **kwargs):
                     if stage == 'run':
@@ -91,7 +91,7 @@ class ReliabilityTests(unittest.TestCase):
                         installer.apply_install(SimpleNamespace(skip_pets=False, no_start=False), client, None,
                                                 inspection={'reuse':{}, 'conflicts':[]})
                     if stage in ('create','run'):
-                        self.assertEqual([call.args[1] for call in restore.call_args_list], [manager.UPDATE_TASK, manager.TASK])
+                        self.assertEqual([call.args[1] for call in restore.call_args_list], [manager.TASK])
                 for path, expected in before.items():
                     self.assertEqual(path.read_bytes(), expected)
                 self.assertFalse((managed/'launcher.py').exists())

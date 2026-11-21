@@ -45,7 +45,7 @@ def collect():
     state = control.read_json(RUNTIME / 'bridge-status.json')
     keys = ('version', 'phase', 'connection_state', 'shutdown_source', 'hotkey', 'hotkey_registered', 'hotkey_error',
             'tray_registered', 'tray_icon_custom', 'tray_error', 'settings_error', 'update_error', 'form', 'native_visible', 'cg_visible', 'native_switch_confirmed', 'error', 'control_details', 'timings_ms',
-            'switch_ready', 'pending_switch', 'pending_switch_notice', 'stage', 'memory_saving', 'memory_saving_error',
+            'switch_ready', 'hotkey_deferred', 'pending_switch', 'pending_switch_notice', 'stage', 'memory_saving', 'memory_saving_error',
             'helper_setup_pending', 'helper_setup_error')
     report = dict(version=VERSION, python=platform.python_version(), platform=platform.system(),
                   status={key:state.get(key) for key in keys},
@@ -58,7 +58,9 @@ def collect():
     report['status']['native_overlay_form'] = state.get('native_overlay_form')
     # Updater status is intentionally small; never include a raw config.toml or global state.
     report['updater'] = {key:report['updater'].get(key) for key in
-                         ('phase', 'installed_version', 'latest_version', 'last_checked', 'error', 'automatic_updates')}
+                         ('phase', 'installed_version', 'error', 'updater_cleanup_error')}
+    report['updater']['automatic_updates'] = False
+    report['updater']['mode'] = 'manual'
     try:
         report['requested_hotkey'] = settings.load()['hotkey']
     except (OSError, ValueError) as error:
