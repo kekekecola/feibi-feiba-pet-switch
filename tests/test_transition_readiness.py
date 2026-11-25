@@ -55,13 +55,48 @@ class TransitionReadinessTests(unittest.TestCase):
              patch.object(background, 'input_tick', return_value=2), \
              patch.object(background.ui_labels, 'pattern', return_value='new'), \
              patch.object(background.native, 'automation'), \
-             patch.object(background.native, 'exists', return_value=False), \
+             patch.object(background, 'setup_control', return_value=None), \
              patch.object(background, 'file_pattern', return_value=pattern):
             with self.assertRaisesRegex(RuntimeError,'未找到新窗口入口'):
                 background.provision(intent)
             self.assertFalse(background.MENU_LEASE.exists())
         pattern.Expand.assert_called_once()
         pattern.Collapse.assert_called_once()
+
+    def test_first_press_waits_for_menu_and_respects_user_opening_it(self):
+        windows = Mock()
+        windows.enumerate.return_value = []
+        opened = Mock(ExpandCollapseState=1)
+        intent = dict(hwnd=11, captured=time.monotonic())
+        with patch.object(background, 'api', return_value=(windows, Mock())), \
+             patch.object(background, 'same_foreground', return_value=True), \
+             patch.object(background, 'input_tick', return_value=2), \
+             patch.object(background, 'still_user_request', return_value=True), \
+             patch.object(background.native, 'automation'), \
+             patch.object(background, 'file_pattern', side_effect=[None, opened]) as probe:
+            with self.assertRaisesRegex(RuntimeError, '正在使用'):
+                background.provision(intent)
+        self.assertEqual(probe.call_count, 2)
+        opened.Expand.assert_not_called()
+        opened.Collapse.assert_not_called()
+
+    def test_repark_requires_same_marked_window_before_selection(self):
+        selector = background.BackgroundSelection.__new__(background.BackgroundSelection)
+        selector.windows = Mock()
+        selector.window = SimpleNamespace(hwnd=11, pid=22)
+        user = selector.windows.user32
+        user.GetForegroundWindow.return_value = 99
+        user.GetSystemMetrics.return_value = 0
+        moved = SimpleNamespace(rect=(0, 0, 800, 600), exstyle=0x080800A0)
+        with patch.object(background, 'api', return_value=(selector.windows, Mock())), \
+             patch.object(background, 'window_from_state', side_effect=[moved, None]), \
+             patch.object(background, 'invisible') as park, \
+             patch.object(background.msaa_controls, 'execute') as execute:
+            with self.assertRaisesRegex(RuntimeError, '未安全停放'):
+                selector.select('feiba', object())
+        park.assert_called_once_with(moved)
+        execute.assert_not_called()
+        user.EnableWindow.assert_not_called()
 
     def test_unrelated_or_withdrawn_cg_cannot_authorize_selection(self):
         ticket = cg_ipc.Ticket.__new__(cg_ipc.Ticket)

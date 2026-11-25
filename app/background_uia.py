@@ -7,6 +7,7 @@ from ctypes import wintypes
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import time
 import threading
@@ -217,12 +218,16 @@ def still_user_request(windows, intent):
 
 
 def file_pattern(root):
-    control = root.MenuItemControl(searchDepth=24, AutomationId='application-menu-trigger-file-menu')
-    if not native.exists(control, .2):
-        control = root.ButtonControl(searchDepth=24, AutomationId='application-menu-trigger-file-menu')
-        if not native.exists(control, .2):
-            return None
-    return control.GetPattern(native.automation().PatternId.ExpandCollapsePattern)
+    from comtypes import COMError
+    from uiautomation.uiautomation import _AutomationClient
+    auto = native.automation()
+    uia = _AutomationClient.instance().IUIAutomation
+    condition = uia.CreatePropertyCondition(auto.PropertyId.AutomationIdProperty, 'application-menu-trigger-file-menu')
+    try:
+        control = auto.Control.CreateControlFromElement(root.Element.FindFirst(4, condition))
+        return control.GetPattern(auto.PatternId.ExpandCollapsePattern) if control else None
+    except COMError:
+        return None  # The menu provider may be replaced during startup.
 
 
 def return_original_focus(windows, intent, helper_hwnd):
@@ -264,13 +269,12 @@ def cleanup_connection_menu():
 def provision(intent):
     windows, _ = api()
     user = windows.user32
-    if not same_foreground(windows, intent) or time.monotonic() - intent['captured'] > 5:
+    if not same_foreground(windows, intent) or time.monotonic() - intent['captured'] > 10:
         raise RuntimeError('首次连接时请在 Codex 前台按 F8。')
     original = {w.hwnd for w in windows.enumerate()}
-    new_window_pattern = ui_labels.pattern('new_window')
     root = native.automation().ControlFromHandle(intent['hwnd'])
     pattern = file_pattern(root)
-    if not pattern or pattern.ExpandCollapseState != 0:
+    if pattern and pattern.ExpandCollapseState != 0:
         raise RuntimeError('文件菜单正在使用或不可安全展开。请收起菜单后在 Codex 按 F8。')
     # WM_HOTKEY is sent on key-down. Let the triggering key-up settle
     # before leasing the menu, then require a quiet interval.
@@ -280,8 +284,16 @@ def provision(intent):
         raise RuntimeError('无法确认当前输入状态。')
     intent = intent | {'input': tick}
     time.sleep(.12)
+    # A newly opened main window can exist before its file menu provider does.
+    # Observe readiness under the original foreground/input lease. Expand once.
+    deadline = time.monotonic() + 6
+    while not pattern and time.monotonic() < deadline and still_user_request(windows, intent):
+        time.sleep(.12)
+        pattern = file_pattern(root)
     if not still_user_request(windows, intent):
         raise RuntimeError('检测到后续输入，已取消本次连接。')
+    if not pattern or pattern.ExpandCollapseState != 0:
+        raise RuntimeError('文件菜单尚未就绪或正在使用，已取消连接。')
     lease = intent | {'expires':time.time()+65}
     MENU_LEASE.write_text(json.dumps(lease), encoding='utf-8')
     found = []
@@ -310,11 +322,9 @@ def provision(intent):
     watcher = None
     try:
         pattern.Expand(waitTime=0)
-        menu = root.MenuItemControl(searchDepth=28, RegexName=new_window_pattern)
-        if not native.exists(menu, 1.0):
-            menu = root.ButtonControl(searchDepth=28, RegexName=new_window_pattern)
-            if not native.exists(menu, .25):
-                raise RuntimeError('本次未找到新窗口入口。')
+        menu = setup_control(root, 'new_window', 1.25)
+        if menu is None:
+            raise RuntimeError('本次未找到新窗口入口。')
         if not still_user_request(windows, intent):
             raise RuntimeError('检测到后续输入，已取消本次连接。')
         watcher = threading.Thread(target=catch_window, daemon=True)
@@ -365,6 +375,7 @@ def prepare(intent=None):
         watcher = threading.Thread(target=watch_user, daemon=True)
         watcher.start()
         try:
+            return_focus()
             return finish_prepare(helper, allow_created_foreground=True)
         finally:
             stop.set()
@@ -381,13 +392,31 @@ def prepare(intent=None):
 
 
 def setup_control(root, key, timeout=.2):
-    # Client releases expose the same entry as either a menu item, button or tab.
-    kinds = ('ButtonControl', 'TabItemControl', 'HyperlinkControl') if key == 'pets' else ('MenuItemControl', 'ButtonControl')
-    for kind in kinds:
-        control = getattr(root, kind)(searchDepth=28, RegexName=ui_labels.pattern(key))
-        if native.exists(control, timeout):
-            return control
-    return None
+    from comtypes import COMError
+    from uiautomation.uiautomation import _AutomationClient
+    auto = native.automation()
+    types = auto.ControlType
+    kinds = (types.ButtonControl, types.TabItemControl, types.HyperlinkControl) if key == 'pets' else (types.MenuItemControl, types.ButtonControl)
+    uia = _AutomationClient.instance().IUIAutomation
+    condition = uia.CreatePropertyCondition(auto.PropertyId.ControlTypeProperty, kinds[0])
+    for kind in kinds[1:]:
+        condition = uia.CreateOrCondition(condition, uia.CreatePropertyCondition(auto.PropertyId.ControlTypeProperty, kind))
+    cache = uia.CreateCacheRequest()
+    cache.AddProperty(auto.PropertyId.NameProperty)
+    match = re.compile(ui_labels.pattern(key))
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            nodes = root.Element.FindAllBuildCache(4, condition, cache)
+            for index in range(nodes.Length):
+                node = nodes.GetElement(index)
+                if match.search(node.CachedName or ''):
+                    return auto.Control.CreateControlFromElement(node)
+        except COMError:
+            pass  # Chromium can replace a node while the new window loads.
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(.08)
 
 
 def navigate_setup(root, helper, key, destination):
@@ -484,21 +513,21 @@ def _finish_prepare(helper, target=None):
         except RuntimeError as error:
             if ambiguous_cards(error):
                 raise
-        if (setup_control(r, 'pets', .1) is not None
-                or setup_control(r, 'settings', .1) is not None
-                or setup_control(r, 'profile', .1) is not None):
+        section = setup_control(r, 'pets', 0)
+        if section is not None:
+            break
+        settings_visible = setup_control(r, 'settings', 0) is not None
+        if settings_visible or setup_control(r, 'profile', 0) is not None:
             break
         if time.monotonic() >= deadline:
             raise RuntimeError('辅助 GPT 窗口尚未加载完成。')
         time.sleep(.15)
-    if setup_control(r, 'pets') is None:
+    if section is None:
         # A pre-existing profile menu must be used directly, not toggled closed.
-        if setup_control(r, 'settings') is None:
-            if setup_control(r, 'profile', 2) is None:
-                raise RuntimeError('辅助 GPT 窗口尚未加载完成。')
-            navigate_setup(r, helper, 'profile', lambda: setup_control(r, 'settings', .6) is not None)
-        navigate_setup(r, helper, 'settings', lambda: setup_control(r, 'pets', .6) is not None)
-    section = setup_control(r, 'pets')
+        if not settings_visible:
+            navigate_setup(r, helper, 'profile', lambda: setup_control(r, 'settings', 3) is not None)
+        navigate_setup(r, helper, 'settings', lambda: setup_control(r, 'pets', 3) is not None)
+        section = setup_control(r, 'pets')
     if section is None:
         raise RuntimeError('后台宠物设置入口在加载期间消失。')
     try:
@@ -570,9 +599,14 @@ class BackgroundSelection:
         identity = {'hwnd': hwnd, 'pid': self.window.pid}
         helper = window_from_state(windows, identity)
         required_styles = 0x00080000 | 0x08000000 | 0x20 | 0x80
-        if (not helper or helper.rect[2] > user.GetSystemMetrics(76)
-                or (helper.exstyle & required_styles) != required_styles or helper.exstyle & 0x8
-                or user.GetForegroundWindow() == hwnd):
+        def parked(window):
+            return (window.rect[2] <= user.GetSystemMetrics(76)
+                    and window.exstyle & required_styles == required_styles and not window.exstyle & 0x8)
+
+        if helper and user.GetForegroundWindow() != hwnd and not parked(helper):
+            invisible(helper)
+            helper = window_from_state(windows, identity)
+        if not helper or user.GetForegroundWindow() == hwnd or not parked(helper):
             raise RuntimeError('辅助窗口未安全停放，已取消原生选择。')
         previous_id = native.preferences().get('selected-avatar-id')
         try:

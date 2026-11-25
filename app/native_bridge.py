@@ -465,7 +465,7 @@ class Bridge:
             intent = None
             helper = background.owned_window()
             last_error = self.state.get('error') or ''
-            replace = helper and last_error.startswith(('后台导航没有响应', '后台个人资料菜单'))
+            replace = helper and last_error.startswith(('后台导航没有响应', '后台个人资料菜单', '辅助 GPT 窗口尚未加载完成'))
             if not helper or replace:
                 if time.monotonic() < self.next_manual_reconnect:
                     self.ack(command_id, 'ignored_busy', '请稍等后再按 F8。')
